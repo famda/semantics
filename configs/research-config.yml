@@ -1,0 +1,85 @@
+# ============================================================================
+# Research CLI Configuration
+# ============================================================================
+# This file contains all configurable options for the research processing CLI.
+# All values shown are the defaults. Uncomment and modify as needed.
+#
+# Usage:
+#   semantics-research -s "query" -o ./output --config config.yml [flags]
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Search Configuration
+# ----------------------------------------------------------------------------
+# Controls web and video search behavior using DuckDuckGo.
+search:
+  # Maximum number of search results to retrieve
+  max_results: 100
+  # Safe search level: off, moderate, strict
+  safesearch: moderate
+  # Search region/locale (e.g., us-en, uk-en, de-de)
+  region: us-en
+
+# ----------------------------------------------------------------------------
+# Crawl Configuration
+# ----------------------------------------------------------------------------
+# Controls web page crawling and content extraction.
+crawl:
+  # Enable BFS deep crawling from seed URLs
+  deep_crawl: false
+  # Maximum traversal depth when deep crawling (1 = only linked pages)
+  max_depth: 1
+  # Maximum number of pages to crawl per seed URL
+  max_pages: 10
+  # Allow deep crawl to follow external domains
+  include_external: false
+  # Minimum word count required to save a page (filters thin content)
+  word_count_threshold: 50
+
+# ----------------------------------------------------------------------------
+# Download Configuration
+# ----------------------------------------------------------------------------
+# Controls video downloads using yt-dlp.
+download:
+  # yt-dlp output filename template
+  filename_template: "%(title)s_%(id)s.%(ext)s"
+  # Maximum video height in pixels (360, 480, 720, 1080, etc.)
+  max_height: 720
+  # Prefer free codecs (VP9, Opus) when available
+  prefer_free_formats: true
+
+# ----------------------------------------------------------------------------
+# Candidates Configuration
+# ----------------------------------------------------------------------------
+# Controls ranking and selection of search results using embeddings.
+candidates:
+  # Sentence embedding model for semantic retrieval
+  retriever_model: nomic-ai/nomic-embed-text-v1.5
+  # Cross-encoder model for reranking candidates
+  reranker_model: cross-encoder/ms-marco-MiniLM-L-6-v2
+  # Maximum tokens per text chunk for embedding
+  max_chunk_tokens: 128
+  # Token overlap between adjacent chunks
+  overlap_tokens: 32
+  # Number of candidates to retrieve before reranking
+  retrieval_k: 50
+  # Batch size for cross-encoder reranking
+  rerank_batch_size: 32
+  # Method for aggregating chunk scores: max, mean, top_k_mean, weighted_mean
+  aggregation_method: max
+  # Minimum score to include a candidate (cross-encoder scores can be negative)
+  min_score_threshold: -5.0
+  # Maximum score difference from top result (null = no filtering)
+  score_margin_threshold: null
+
+# ----------------------------------------------------------------------------
+# Extract Configuration
+# ----------------------------------------------------------------------------
+# Controls structured content extraction using LLMs.
+extract:
+  # LLM model for structured extraction (via LiteLLM)
+  llm_model: gpt-4o-mini
+  # Maximum tokens for LLM response
+  max_tokens: 4096
+  # LLM temperature (0.0 for deterministic extraction)
+  temperature: 0.0

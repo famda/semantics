@@ -1,0 +1,47 @@
+# Research CLI Dependencies
+# Use SETUP_CLI_REFRESH_LOCK=1 to regenerate requirements.lock
+
+# CLI Framework
+click>=8.2.1
+colorama>=0.4.6
+
+# Configuration
+pydantic>=2.0
+PyYAML>=6.0.3
+
+# Web Search
+ddgs>=9.0
+
+# Web Crawling
+Crawl4AI>=0.7
+playwright>=1.57.0
+beautifulsoup4>=4.14.3
+lxml>=5.4.0
+
+# Video Download
+yt-dlp>=2025.9.26
+
+# Document Processing
+unstructured[md]>=0.18
+pypdf>=6.6.0
+python-magic>=0.4.27
+
+# ML Frameworks
+torch<2.9
+numpy<3.0.0
+
+# Embeddings & NLP
+sentence-transformers>=5.0
+transformers>=4.57.0
+huggingface-hub[hf_xet]>=0.36.0
+einops>=0.8.1
+nltk>=3.9.2
+
+# LLM Integration
+litellm>=1.70
+openai>=2.0
+
+# Utilities
+requests>=2.32.5
+tqdm>=4.67.1
+rapidfuzz>=3.14.3

@@ -1,0 +1,61 @@
+{
+    "name": "Platform Research CLI",
+    // Standalone compose file - only builds this service
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "worker-research",
+    "workspaceFolder": "/platform/research",
+    
+    // Disable default workspace mount - we handle mounts in docker-compose.yml
+    "workspaceMount": "",
+    
+    // Keep container running when VS Code closes
+    "shutdownAction": "none",
+    
+    // Override the default command to keep the container running
+    "overrideCommand": true,
+    
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.debugpy",
+                "charliermarsh.ruff",
+                "tamasfe.even-better-toml",
+                "redhat.vscode-yaml"
+            ],
+            "settings": {
+                "python.defaultInterpreterPath": "/platform/research/venv/bin/python",
+                "python.terminal.activateEnvironment": false,
+                "python.analysis.extraPaths": ["/platform"],
+                "[python]": {
+                    "editor.defaultFormatter": "charliermarsh.ruff",
+                    "editor.formatOnSave": true
+                },
+                "terminal.integrated.defaultProfile.linux": "bash",
+                "files.exclude": {
+                    "**/.git": true,
+                    "**/__pycache__": true,
+                    "**/*.pyc": true,
+                    "**/venv": true
+                }
+            }
+        }
+    },
+    
+    // Create host directories before container starts
+    "initializeCommand": ["powershell", "-Command", "New-Item -ItemType Directory -Force -Path '.data/platform/workspaces/assets','.data/platform/workspaces/results' | Out-Null"],
+    
+    "postStartCommand": "mkdir -p /platform/research/.data && ln -sfn /workspaces /platform/research/.data/workspaces && echo '✅ Research CLI ready! Run: research-cli -h'",
+    
+    "remoteUser": "root",
+    
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": true,
+            "configureZshAsDefaultShell": false,
+            "installOhMyZsh": false,
+            "upgradePackages": false
+        }
+    }
+}

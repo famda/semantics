@@ -1,0 +1,32 @@
+# Ignore version control metadata
+.git
+.gitmodules
+.gitignore
+
+**/.venv/
+**/env/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/.uv/
+**/uv.lock
+
+# Ignore OS-specific files
+.DS_Store
+Thumbs.db
+
+# Ignore editor folders
+.vscode/
+.idea/
+
+# Ignore Node and package manager folders
+**/node_modules/
+**/dist/
+**/build/
+
+# Ignore .NET build artifacts
+Platform.Wrk/bin/
+Platform.Wrk/obj/
+
+# Ensure the .data directory is included in build contexts
+.data/

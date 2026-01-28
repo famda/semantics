@@ -1,0 +1,33 @@
+# Standalone devcontainer compose for worker-research
+# Uses the production Dockerfile but only builds this single service
+
+x-cuda-support: &cuda-support
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu, utility, compute, video]
+
+services:
+  worker-research:
+    build:
+      context: ../..
+      dockerfile: src/Dockerfile
+      args:
+        WORKER_TYPES: "research"
+    tty: true
+    stdin_open: true
+    environment:
+      - TF_ENABLE_ONEDNN_OPTS=0
+      - TF_DISABLE_XLA=1
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      - ../../.data/platform/workspaces:/workspaces
+      - ../../src/semantics/research/modules:/platform/research/modules:cached
+      - ../../src/semantics/research/main.py:/platform/research/main.py:cached
+      - ../../src/semantics/research/config.py:/platform/research/config.py:cached
+      - ../../src/semantics/global_helpers.py:/platform/research/global_helpers.py:cached
+    <<: *cuda-support

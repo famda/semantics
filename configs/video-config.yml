@@ -1,0 +1,215 @@
+# =============================================================================
+# Video Processing CLI Configuration
+# =============================================================================
+# This file contains all configurable options for the video processing pipeline.
+# Uncomment and modify values as needed. Defaults are shown in comments.
+
+# -----------------------------------------------------------------------------
+# Download Configuration (YouTube/URL downloads)
+# -----------------------------------------------------------------------------
+download:
+  # Maximum video height when downloading from URLs (e.g., 360, 720, 1080)
+  max_height: 720
+
+  # yt-dlp filename template for downloaded videos
+  # See: https://github.com/yt-dlp/yt-dlp#output-template
+  filename_template: "%(title)s_%(id)s.%(ext)s"
+
+# -----------------------------------------------------------------------------
+# Frame Extraction Configuration
+# -----------------------------------------------------------------------------
+frames:
+  # Target frames per second for extraction
+  # null uses the source video's native FPS
+  target_fps: null
+
+  # Enable hardware acceleration (CUDA, NVDEC, VAAPI, etc.) for decoding
+  # Significantly speeds up frame extraction on supported systems
+  enable_hwaccel: true
+
+  # Number of parallel FFmpeg jobs for frame extraction
+  # null auto-detects based on CPU cores
+  parallel_jobs: null
+
+# -----------------------------------------------------------------------------
+# Segment/Keyframe Extraction Configuration (PySceneDetect adaptive)
+# -----------------------------------------------------------------------------
+segments:
+  # FPS used for scene detection (downsampled from source)
+  # Lower values = faster detection but may miss quick cuts
+  target_detection_fps: 12.0
+
+  # Always include the last frame of the video as a keyframe
+  include_last_frame: true
+
+# -----------------------------------------------------------------------------
+# Frame Clustering Configuration (MobileNet-based)
+# -----------------------------------------------------------------------------
+clustering:
+  # MobileNet cosine similarity threshold for cluster merging
+  # Higher = more strict clustering, fewer merged frames
+  mn_threshold: 0.995
+
+  # DBSCAN epsilon for MobileNet feature clustering
+  mn_eps: 0.2
+
+  # DBSCAN min_samples for MobileNet clustering
+  mn_min_samples: 3
+
+  # Frame sampling rate for clustering analysis (FPS)
+  fps: 1.0
+
+  # Enable keyframe selection from clusters
+  keyframes: true
+
+  # DBSCAN epsilon for keyframe sub-clustering
+  kf_eps: 0.18
+
+  # DBSCAN min_samples for keyframe sub-clustering
+  kf_min_samples: 1
+
+  # Fraction of Hamming distance for perceptual hash filtering
+  # Lower = more strict filtering
+  kf_hamming_frac: 0.30
+
+  # Require both DBSCAN and Hamming criteria for keyframe selection
+  kf_require_both: true
+
+  # Save selected keyframes to disk as images
+  save_keyframes: true
+
+  # Save all cluster frames to disk (can generate many files)
+  save_clusters: false
+
+# -----------------------------------------------------------------------------
+# Captions Configuration (Florence-2)
+# -----------------------------------------------------------------------------
+captions:
+  # HuggingFace model ID for Florence-2 captioning
+  # Options: "microsoft/Florence-2-base", "microsoft/Florence-2-large-ft"
+  model_id: "microsoft/Florence-2-large-ft"
+
+  # Model precision for inference
+  # Options: "fp16", "fp32", "bf16"
+  precision: "fp16"
+
+  # Default object queries for visual grounding (dot-separated list)
+  default_queries: "person. car. dog. cat. bicycle. chair. book. phone. text."
+
+  # Enable OCR text extraction from frames
+  run_ocr: false
+
+  # Enable object detection in frames
+  run_objects: false
+
+  # Enable visual grounding for object queries
+  run_visual_grounding: false
+
+# -----------------------------------------------------------------------------
+# Object Detection Configuration (YOLO + DeepFace)
+# -----------------------------------------------------------------------------
+objects:
+  # YOLO model for object detection
+  # Options: "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"
+  #          "yolo26n.pt", "yolo26s.pt", "yolo26m.pt", "yolo26l.pt", "yolo26x.pt"
+  detection_model: "yolo26s.pt"
+
+  # YOLO model for instance segmentation
+  # Options: "yolo11n-seg.pt", "yolo11s-seg.pt", "yolo11m-seg.pt", etc.
+  #          "yolo26n-seg.pt", "yolo26s-seg.pt", "yolo26m-seg.pt", etc.
+  segmentation_model: "yolo26s-seg.pt"
+
+  # YOLO model for pose estimation
+  # Options: "yolo11n-pose.pt", "yolo11s-pose.pt", "yolo11m-pose.pt", etc.
+  #          "yolo26n-pose.pt", "yolo26s-pose.pt", "yolo26m-pose.pt", etc.
+  pose_model: "yolo26s-pose.pt"
+
+  # Confidence threshold for YOLO object detection (0.0 - 1.0)
+  object_conf_threshold: 0.80
+
+  # IoU threshold for matching detections across frames
+  iou_match_threshold: 0.5
+
+  # Confidence threshold for pose keypoint detection
+  keypoint_conf_threshold: 0.6
+
+  # Confidence threshold for face detection
+  face_conf_threshold: 0.9
+
+  # DeepFace embedding model for face recognition
+  # Options: "Facenet", "Facenet512", "VGG-Face", "ArcFace", etc.
+  embedding_model_name: "Facenet512"
+
+  # Minimum image side length for face detection upscaling
+  face_detect_min_side: 720
+
+  # Maximum scale factor for face detection upscaling
+  face_detect_max_scale: 2.0
+
+  # DeepFace detector backend
+  # Options: "retinaface", "mtcnn", "opencv", "ssd", "dlib"
+  detector_backend: "retinaface"
+
+  # OpenAI CLIP model for object embedding and similarity
+  # Options: "ViT-B/32", "ViT-B/16", "ViT-L/14", etc.
+  clip_model_name: "ViT-B/32"
+
+  # Base DBSCAN epsilon for object/face clustering
+  cluster_base_eps: 0.35
+
+  # DBSCAN min_samples for object clustering
+  cluster_min_samples: 1
+
+  # Minimum clustering attempts for adaptive epsilon tuning
+  cluster_min_attempts: 4
+
+  # DBSCAN epsilon for keyframe extraction from object clusters
+  keyframe_eps: 0.12
+
+  # DBSCAN min_samples for keyframe extraction
+  keyframe_min_samples: 1
+
+  # Hamming distance fraction for perceptual hash keyframe filtering
+  keyframe_hamming_frac: 0.30
+
+  # Require both DBSCAN and Hamming criteria for keyframe selection
+  keyframe_require_both: true
+
+# -----------------------------------------------------------------------------
+# Tiles Configuration (Video Mosaics)
+# -----------------------------------------------------------------------------
+tiles:
+  # Number of columns in the tile grid
+  columns: 3
+
+  # Number of rows in the tile grid
+  rows: 3
+
+  # Final tile width in pixels (null preserves original dimensions)
+  final_tile_width: null
+
+  # Final tile height in pixels (null preserves original dimensions)
+  final_tile_height: null
+
+  # RGB background color for empty tile spaces [R, G, B]
+  background_color: [0, 255, 0]
+
+# -----------------------------------------------------------------------------
+# Scene Detection Configuration (PySceneDetect)
+# -----------------------------------------------------------------------------
+scenes:
+  # Scene detector type
+  # Options: "content" (color histogram), "threshold" (brightness)
+  detector_type: "content"
+
+  # Detection threshold for scene changes
+  # Higher = fewer scene cuts detected
+  threshold: 27.0
+
+  # Minimum scene length in frames
+  # Prevents very short scenes from being split
+  min_scene_len: 15
+
+  # Use codec copy for faster scene splitting
+  # May cause issues at scene boundaries (artifacts, sync problems)
+  use_codec_copy: false
