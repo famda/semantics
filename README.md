@@ -76,7 +76,7 @@ docker run --rm --gpus all \
   semantics-video \
     -i /workspaces/assets/sample.mp4 \
     -o /workspaces/results/my_video_run \
-    -s -eo
+    --from-segments -s -eo
 ```
 
 ### Web Research
@@ -93,6 +93,118 @@ docker run --rm \
     -o /workspaces/results/my_research_run \
     -s 'machine learning trends 2025' \
     --download
+```
+
+---
+
+## Using Docker Compose (Recommended)
+
+For easier workflow, use Docker Compose to keep containers running and execute commands interactively.
+
+### Setup
+
+Create a `docker-compose.yml` file in your project directory:
+
+```yaml
+x-cuda-support: &cuda-support
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu, utility, compute, video]
+
+x-volumes: &volumes
+  volumes:
+    - ./.data/semantics/assets:/workspaces/assets
+    - ./.data/semantics/results:/workspaces/results
+
+x-environment: &environment
+  environment:
+    - TF_ENABLE_ONEDNN_OPTS=0
+    - TF_DISABLE_XLA=1
+    - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+services:
+  semantics-audio:
+    image: famda/semantics:audio-latest
+    tty: true
+    stdin_open: true
+    <<: [*environment, *volumes, *cuda-support]
+
+  semantics-video:
+    image: famda/semantics:video-latest
+    tty: true
+    stdin_open: true
+    <<: [*environment, *volumes, *cuda-support]
+
+  semantics-research:
+    image: famda/semantics:research-latest
+    tty: true
+    stdin_open: true
+    <<: [*environment, *volumes, *cuda-support]
+```
+
+### Start the Containers
+
+```bash
+# Start all workers in the background
+docker compose up -d
+
+# Or start specific workers
+docker compose up -d semantics-audio
+docker compose up -d semantics-video
+docker compose up -d semantics-research
+```
+
+### Run Commands Inside Containers
+
+With containers running, use `docker compose exec` to run commands:
+
+```bash
+# Audio: Transcribe and diarize
+docker compose exec semantics-audio semantics-audio \
+  -i /workspaces/assets/sample.mp4 \
+  -o /workspaces/results/audio_output \
+  -t -d
+
+# Video: Extract scenes and objects
+docker compose exec semantics-video semantics-video \
+  -i /workspaces/assets/sample.mp4 \
+  -o /workspaces/results/video_output \
+  --from-segments -s -eo
+
+# Research: Search and crawl
+docker compose exec semantics-research semantics-research \
+  -o /workspaces/results/research_output \
+  -s 'machine learning trends 2025' \
+  --download
+```
+
+### Interactive Shell Access
+
+Enter a container shell for debugging or exploration:
+
+```bash
+# Enter audio worker
+docker compose exec semantics-audio [pwsh or bash]
+
+# Enter video worker
+docker compose exec semantics-video [pwsh or bash]
+
+# Enter research worker
+docker compose exec semantics-research [pwsh or bash]
+```
+
+### Stop the Containers
+
+```bash
+# Stop all workers
+docker compose down
+
+# Stop specific worker
+docker compose stop semantics-audio
 ```
 
 ---
@@ -180,7 +292,7 @@ docker run --rm --gpus all \
   semantics-video \
     -i /workspaces/assets/conference.mp4 \
     -o /workspaces/results/conference_analysis \
-    -s -eo -classes person --save-annotations --debug
+    --from-segments -s -eo -classes person --save-annotations --debug
 ```
 
 ---

@@ -211,6 +211,17 @@ def main(
     """
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0" if debug else "3"
 
+    # Validate that at least one frame selection mode is specified
+    if not (from_frames or from_clustering or from_segments):
+        click.echo(
+            "Error: You must specify a frame selection mode. Use one of:\n"
+            "  --from-frames      Analyze from extracted video frames\n"
+            "  --from-clustering  Analyze from keyframe/clustering on frames\n"
+            "  --from-segments    Analyze from keyframes/segments",
+            err=True,
+        )
+        sys.exit(1)
+
     # Load configuration if provided
     video_config = None
     if config:
