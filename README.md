@@ -19,30 +19,27 @@ The Semantics CLI consists of three specialized command-line tools:
 ### Prerequisites
 
 - Docker with NVIDIA GPU support (for GPU acceleration)
-- Docker Compose v2+
 
-### Build the Worker Images
+### Pull the Worker Images
 
-```bash
-# Build all worker images
-docker compose build
-
-# Or build specific workers
-docker compose build worker-audio
-docker compose build worker-video
-docker compose build worker-research
-```
-
-### Start the Workers
+Pre-built images are available on Docker Hub:
 
 ```bash
-# Start all workers
-docker compose up -d
+# Pull all worker images
+docker pull famda/semantics:audio-latest
+docker pull famda/semantics:video-latest
+docker pull famda/semantics:research-latest
 
-# Or start specific workers
-docker compose up -d worker-audio
-docker compose up -d worker-video
+# Or pull a specific commit
+docker pull famda/semantics:audio-abc1234
 ```
+
+### Available Tags
+
+| Tag Pattern | Description |
+|-------------|-------------|
+| `audio-latest`, `video-latest`, `research-latest` | Latest stable build from main branch |
+| `audio-<sha>`, `video-<sha>`, `research-<sha>` | Specific commit builds (7-char SHA) |
 
 ---
 
@@ -51,40 +48,51 @@ docker compose up -d worker-video
 ### Audio Processing
 
 ```bash
-# Create output directory
-docker compose exec worker-audio bash -lc "mkdir -p /workspaces/results/my_audio_run"
+# Create local directories for input/output
+mkdir -p ./assets ./results/my_audio_run
 
 # Transcribe and diarize an audio/video file
-docker compose exec worker-audio bash -lc "semantics-audio \
-  -i /workspaces/assets/sample.mp4 \
-  -o /workspaces/results/my_audio_run \
-  -t -d"
+docker run --rm --gpus all \
+  -v "$(pwd)/assets:/workspaces/assets" \
+  -v "$(pwd)/results:/workspaces/results" \
+  famda/semantics:audio-latest \
+  semantics-audio \
+    -i /workspaces/assets/sample.mp4 \
+    -o /workspaces/results/my_audio_run \
+    -t -d
 ```
 
 ### Video Analysis
 
 ```bash
-# Create output directory
-docker compose exec worker-video bash -lc "mkdir -p /workspaces/results/my_video_run"
+# Create local directories for input/output
+mkdir -p ./assets ./results/my_video_run
 
 # Extract scenes and objects from a video
-docker compose exec worker-video bash -lc "semantics-video \
-  -i /workspaces/assets/sample.mp4 \
-  -o /workspaces/results/my_video_run \
-  -s -eo"
+docker run --rm --gpus all \
+  -v "$(pwd)/assets:/workspaces/assets" \
+  -v "$(pwd)/results:/workspaces/results" \
+  famda/semantics:video-latest \
+  semantics-video \
+    -i /workspaces/assets/sample.mp4 \
+    -o /workspaces/results/my_video_run \
+    -s -eo
 ```
 
 ### Web Research
 
 ```bash
-# Create output directory
-docker compose exec worker-research bash -lc "mkdir -p /workspaces/results/my_research_run"
+# Create local output directory
+mkdir -p ./results/my_research_run
 
 # Search and crawl web content
-docker compose exec worker-research bash -lc "semantics-research \
-  -o /workspaces/results/my_research_run \
-  -s 'machine learning trends 2025' \
-  --download"
+docker run --rm \
+  -v "$(pwd)/results:/workspaces/results" \
+  famda/semantics:research-latest \
+  semantics-research \
+    -o /workspaces/results/my_research_run \
+    -s 'machine learning trends 2025' \
+    --download
 ```
 
 ---
@@ -122,10 +130,14 @@ Options:
 
 **Example: Full audio pipeline**
 ```bash
-docker compose exec worker-audio bash -lc "semantics-audio \
-  -i /workspaces/assets/interview.mp4 \
-  -o /workspaces/results/interview_analysis \
-  -n -s -t -d -c -em --debug"
+docker run --rm --gpus all \
+  -v "$(pwd)/assets:/workspaces/assets" \
+  -v "$(pwd)/results:/workspaces/results" \
+  famda/semantics:audio-latest \
+  semantics-audio \
+    -i /workspaces/assets/interview.mp4 \
+    -o /workspaces/results/interview_analysis \
+    -n -s -t -d -c -em --debug
 ```
 
 ---
@@ -161,10 +173,14 @@ Options:
 
 **Example: Extract scenes and detect people**
 ```bash
-docker compose exec worker-video bash -lc "semantics-video \
-  -i /workspaces/assets/conference.mp4 \
-  -o /workspaces/results/conference_analysis \
-  -s -eo -classes person --save-annotations --debug"
+docker run --rm --gpus all \
+  -v "$(pwd)/assets:/workspaces/assets" \
+  -v "$(pwd)/results:/workspaces/results" \
+  famda/semantics:video-latest \
+  semantics-video \
+    -i /workspaces/assets/conference.mp4 \
+    -o /workspaces/results/conference_analysis \
+    -s -eo -classes person --save-annotations --debug
 ```
 
 ---
@@ -196,13 +212,16 @@ Options:
 
 **Example: Deep crawl a website**
 ```bash
-docker compose exec worker-research bash -lc "semantics-research \
-  -o /workspaces/results/website_crawl \
-  --download-url 'https://example.com/docs' \
-  --download-deep \
-  --download-max-depth 3 \
-  --download-max-pages 100 \
-  --structured --debug"
+docker run --rm \
+  -v "$(pwd)/results:/workspaces/results" \
+  famda/semantics:research-latest \
+  semantics-research \
+    -o /workspaces/results/website_crawl \
+    --download-url 'https://example.com/docs' \
+    --download-deep \
+    --download-max-depth 3 \
+    --download-max-pages 100 \
+    --structured --debug
 ```
 
 ---
