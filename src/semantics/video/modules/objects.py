@@ -631,7 +631,12 @@ def _ensure_yolo_models(
 
     if _YOLO_OBJECT_MODEL is None:
         with gray_debug_output(debug):
-            object_model = YOLO(detection_model_name)
+            old_cwd = os.getcwd()
+            try:
+                os.chdir("/platform")
+                object_model = YOLO(detection_model_name)
+            finally:
+                os.chdir(old_cwd)
         _YOLO_OBJECT_MODEL = _prepare_yolo_model(object_model, device, use_half=_YOLO_USE_HALF_PRECISION, debug=debug)
         try:
             _YOLO_OBJECT_MODEL.model.eval()  # type: ignore[attr-defined]
@@ -640,7 +645,12 @@ def _ensure_yolo_models(
 
     if require_segmentation and _YOLO_SEGMENTATION_MODEL is None:
         with gray_debug_output(debug):
-            segmentation_model = YOLO(segmentation_model_name)
+            old_cwd = os.getcwd()
+            try:
+                os.chdir("/platform")
+                segmentation_model = YOLO(segmentation_model_name)
+            finally:
+                os.chdir(old_cwd)
         _YOLO_SEGMENTATION_MODEL = _prepare_yolo_model(segmentation_model, device, use_half=_YOLO_USE_HALF_PRECISION, debug=debug)
         try:
             _YOLO_SEGMENTATION_MODEL.model.eval()  # type: ignore[attr-defined]
@@ -649,7 +659,12 @@ def _ensure_yolo_models(
 
     if require_pose and _YOLO_POSE_MODEL is None:
         with gray_debug_output(debug):
-            pose_model = YOLO(pose_model_name)
+            old_cwd = os.getcwd()
+            try:
+                os.chdir("/platform")
+                pose_model = YOLO(pose_model_name)
+            finally:
+                os.chdir(old_cwd)
         _YOLO_POSE_MODEL = _prepare_yolo_model(pose_model, device, use_half=_YOLO_USE_HALF_PRECISION, debug=debug)
         try:
             _YOLO_POSE_MODEL.model.eval()  # type: ignore[attr-defined]

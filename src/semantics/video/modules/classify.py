@@ -110,8 +110,13 @@ def _ensure_yolo_classification_model(
 
     try:
         with gray_debug_output(debug):
-            model = YOLO(model_name)
-            model.to(device)
+            old_cwd = os.getcwd()
+            try:
+                os.chdir("/platform")
+                model = YOLO(model_name)
+                model.to(device)
+            finally:
+                os.chdir(old_cwd)
     except Exception as exc:
         print(f"ERROR: Failed to load YOLO classification model '{model_name}': {exc}")
         return None, None, False
@@ -488,7 +493,7 @@ def handle(
         if save_annotations and filtered_predictions:
             annotation_path = os.path.join(
                 annotations_folder,
-                f"frame_{frame_number:08d}.png",
+                f"{frame_number:08d}.png",
             )
             saved_path = _save_annotated_frame(
                 frame_img,
