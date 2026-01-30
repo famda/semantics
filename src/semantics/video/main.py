@@ -175,6 +175,7 @@ def _coerce_int(value) -> Optional[int]:
 @click.option("-c", "--captions", is_flag=True, help="Extract captions from the video")
 @click.option("-s", "--scenes", is_flag=True, help="Enable scene extraction")
 @click.option("-ocr", "--extract-text", is_flag=True, help="Enable text extraction (OCR)")
+@click.option("-cl", "--classify", is_flag=True, help="Enable frame classification")
 @click.option("--download-resolution", type=int, default=None, help="Max video height when downloading from URL")
 @click.option("--from-frames", is_flag=True, help="Analyze from extracted video frames")
 @click.option("--from-clustering", is_flag=True, help="Analyze from keyframe/clustering on frames")
@@ -194,6 +195,7 @@ def main(
     captions: bool,
     scenes: bool,
     extract_text: bool,
+    classify: bool,
     download_resolution: Optional[int],
     from_frames: bool,
     from_clustering: bool,
@@ -436,6 +438,24 @@ def main(
             save_annotations=save_annotations,
             debug=debug,
         )
+
+    # Image classification
+    if classify:
+        if not frame_indices_to_process:
+            click.echo("ERROR: Classification requested but no frame indexes selected", err=True)
+        else:
+            with gray_debug_output(debug):
+                from modules import classify as classify_module
+
+            classification_cfg = video_config.classification if video_config else None
+            classify_module.handle(
+                file,
+                temp_folder,
+                config=classification_cfg,
+                frame_indices=frame_indices_to_process,
+                save_annotations=save_annotations,
+                debug=debug,
+            )
 
 
 if __name__ == "__main__":

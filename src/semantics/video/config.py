@@ -133,15 +133,15 @@ class ObjectsConfig(BaseModel):
     """Configuration for YOLO-based object detection, pose estimation, and face recognition."""
 
     detection_model: str = Field(
-        default="yolo11s.pt",
+        default="yolo26x.pt",
         description="YOLO model for object detection (e.g., yolo11s.pt, yolo26s.pt).",
     )
     segmentation_model: str = Field(
-        default="yolo11s-seg.pt",
+        default="yolo26x-seg.pt",
         description="YOLO model for instance segmentation (e.g., yolo11s-seg.pt, yolo26s-seg.pt).",
     )
     pose_model: str = Field(
-        default="yolo11s-pose.pt",
+        default="yolo26x-pose.pt",
         description="YOLO model for pose estimation (e.g., yolo11s-pose.pt, yolo26s-pose.pt).",
     )
     object_conf_threshold: float = Field(
@@ -273,6 +273,23 @@ class OcrConfig(BaseModel):
     )
 
 
+class ClassificationConfig(BaseModel):
+    """Configuration for YOLO-based image classification."""
+
+    model: str = Field(
+        default="yolo26s-cls.pt",
+        description="YOLO classification model (e.g., yolo11s-cls.pt, yolo11m-cls.pt).",
+    )
+    conf_threshold: float = Field(
+        default=0.25,
+        description="Minimum confidence threshold for predictions (0.0 - 1.0).",
+    )
+    top_k: int = Field(
+        default=5,
+        description="Number of top predictions to return per frame.",
+    )
+
+
 class VideoConfig(BaseModel):
     """Root configuration for all video processing modules."""
 
@@ -311,6 +328,10 @@ class VideoConfig(BaseModel):
     ocr: OcrConfig = Field(
         default_factory=OcrConfig,
         description="OCR text extraction settings.",
+    )
+    classification: ClassificationConfig = Field(
+        default_factory=ClassificationConfig,
+        description="Image classification settings.",
     )
 
 

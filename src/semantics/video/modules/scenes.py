@@ -144,7 +144,9 @@ def _split_scenes(
 
     _close_video(video_handle)
 
-    output_template = os.path.join(scenes_root, "scene-$SCENE_NUMBER.mp4")
+    # Use a filename-only template and pass the directory via `output_dir`
+    # to avoid double-specifying the scenes_root which caused nested paths.
+    output_template = "scene-$SCENE_NUMBER.mp4"
     ffmpeg_override = _build_ffmpeg_override(use_codec_copy)
     debug_print(
         f"Splitting video into {len(scene_list)} scene clip(s) using override '{ffmpeg_override}'",

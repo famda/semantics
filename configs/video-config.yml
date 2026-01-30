@@ -213,3 +213,18 @@ scenes:
   # Use codec copy for faster scene splitting
   # May cause issues at scene boundaries (artifacts, sync problems)
   use_codec_copy: false
+
+# -----------------------------------------------------------------------------
+# Image Classification Configuration (YOLO Classification)
+# -----------------------------------------------------------------------------
+classification:
+  # YOLO classification model
+  # Options: "yolo11n-cls.pt", "yolo11s-cls.pt", "yolo11m-cls.pt", "yolo11l-cls.pt", "yolo11x-cls.pt"
+  model: "yolo11s-cls.pt"
+
+  # Minimum confidence threshold for predictions (0.0 - 1.0)
+  # Lower values return more predictions, higher values are more selective
+  conf_threshold: 0.25
+
+  # Number of top predictions to return per frame
+  top_k: 5
