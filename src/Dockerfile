@@ -31,6 +31,9 @@ RUN apt-get update && \
     && dpkg -i packages-microsoft-prod.deb \
     && apt-get update \
     && apt-get install -y --no-install-recommends powershell \
+    # Install Node.js LTS (required by yt-dlp for YouTube extraction) \
+    && curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     # Install ASP.NET Core Runtime 10.0 (used by Worker) \
     && wget https://dot.net/v1/dotnet-install.sh -O dotnet-install.sh \
     && chmod +x dotnet-install.sh \

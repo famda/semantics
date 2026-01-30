@@ -15,6 +15,8 @@ DEFAULT_FILENAME_TEMPLATE = '%(title)s_%(id)s.%(ext)s'
 BASE_YDL_OPTIONS = {
     'format': 'bestvideo+bestaudio/best',
     'noplaylist': True,
+    # Enable Node.js as the JavaScript runtime for YouTube extraction
+    'js_runtimes': {'node': {}},
     'progress_hooks': [lambda d: print(f"Hook: Status={d.get('status')}, File={d.get('filename')}, {_progress_str(d)}") if d.get('status') == 'downloading' else None],
     'postprocessor_hooks': [lambda d: print(f"Postprocessor: Status={d.get('status')}, PP={d.get('postprocessor')}, Info={d.get('info_dict', {}).get('filepath') or ''}")],
     'http_headers': {

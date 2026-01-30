@@ -98,6 +98,8 @@ def _base_options(outtmpl: str, max_height: int | None) -> Dict[str, Any]:
         "format": _format_for_height(max_height),
         "noplaylist": True,
         "outtmpl": outtmpl,
+        # Enable Node.js as the JavaScript runtime for YouTube extraction
+        "js_runtimes": {"node": {}},
         "progress_hooks": [_make_progress_hook()],
         "postprocessor_hooks": [_make_postprocessor_hook()],
         "retries": 5,
