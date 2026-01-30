@@ -45,8 +45,6 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Install asciinema for recording terminal sessions (optional) - demonstration purposes
-RUN apt-get update && apt-get install -y asciinema && which asciinema || true
 
 ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
