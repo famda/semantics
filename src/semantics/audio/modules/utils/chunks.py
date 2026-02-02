@@ -232,8 +232,9 @@ def concatenate_audio(
 
     with list_file.open("w", encoding="utf-8") as f:
         for chunk in chunk_files:
-            safe_path = Path(chunk).as_posix().replace("'", "'\\''")
-            f.write(f"file '{safe_path}'\n")
+            # Use absolute path to avoid path resolution issues
+            abs_path = Path(chunk).resolve().as_posix().replace("'", "'\\''")
+            f.write(f"file '{abs_path}'\n")
 
     command = [
         "ffmpeg",
