@@ -12,8 +12,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional
+import numpy as np
+from scipy.io import wavfile
+from scipy.ndimage import uniform_filter1d
 
 from colorama import Fore, Style, init
 
@@ -29,6 +33,103 @@ _GRAY = Fore.LIGHTBLACK_EX
 init()
 
 
+def detect_audio_segments(
+    audio_path: Path, 
+    label: str, 
+    onset_db: float = -45.0, 
+    offset_db: float = -60.0, 
+    min_duration: float = 0.2, 
+    smooth_window: float = 0.1
+) -> List[Dict]:
+    """
+    Detects active segments in a Demucs stem using hysteresis thresholding.
+    
+    Args:
+        audio_path: Path to the .wav file.
+        label: Label for the JSON ('music' or 'vocals').
+        onset_db: volume (dB) required to START a segment.
+        offset_db: volume (dB) required to STOP a segment (allows trailing fade-outs).
+        min_duration: minimum seconds to count as a segment.
+        smooth_window: window size in seconds to smooth out clicks/pops.
+    """
+    if not audio_path.exists():
+        return []
+
+    try:
+        # Read WAV file
+        sample_rate, data = wavfile.read(str(audio_path))
+        
+        # Normalize to float32 (-1.0 to 1.0)
+        if data.dtype == np.int16:
+            data = data.astype(np.float32) / 32768.0
+        elif data.dtype == np.int32:
+            data = data.astype(np.float32) / 2147483648.0
+        
+        # Mix to mono for detection
+        if len(data.shape) > 1:
+            data = np.mean(data, axis=1)
+
+        # RMS Calculation Settings
+        hop_length = int(sample_rate * 0.01) # 10ms steps
+        
+        # Pad data
+        pad_needed = hop_length - (len(data) % hop_length)
+        if pad_needed < hop_length:
+            data = np.pad(data, (0, pad_needed))
+        
+        # Reshape to frames
+        frames = data.reshape(-1, hop_length)
+        
+        # Calculate Amplitude Envelope (Root Mean Square)
+        envelope = np.sqrt(np.mean(frames**2, axis=1))
+        
+        # Convert to dB
+        db_env = 20 * np.log10(envelope + 1e-9)
+
+        # Smooth signal to remove rapid clicks/artifacts
+        window_size = int(smooth_window * sample_rate / hop_length)
+        if window_size > 1:
+            db_env = uniform_filter1d(db_env, size=window_size)
+
+        # Hysteresis Logic
+        segments = []
+        is_active = False
+        start_frame = 0
+        frame_duration = hop_length / sample_rate
+
+        for i, db_val in enumerate(db_env):
+            if not is_active:
+                if db_val > onset_db:
+                    is_active = True
+                    start_frame = i
+            else:
+                if db_val < offset_db:
+                    is_active = False
+                    duration = (i - start_frame) * frame_duration
+                    if duration >= min_duration:
+                        segments.append({
+                            "start": round(start_frame * frame_duration, 3),
+                            "end": round(i * frame_duration, 3),
+                            "label": label
+                        })
+
+        # Handle end of file
+        if is_active:
+            duration = (len(db_env) - start_frame) * frame_duration
+            if duration >= min_duration:
+                segments.append({
+                    "start": round(start_frame * frame_duration, 3),
+                    "end": round(len(db_env) * frame_duration, 3),
+                    "label": label
+                })
+
+        return segments
+
+    except Exception as e:
+        print(f"WARN: Error analyzing {label} segments: {e}")
+        return []
+
+
 def handle(
     input_file: str,
     output_folder: str,
@@ -36,18 +137,8 @@ def handle(
     *,
     debug: bool = False,
 ) -> str:
-    """Perform source separation using Demucs.
-
-    Args:
-        input_file: Path to the input audio file.
-        output_folder: Directory where output files will be written.
-        config: StemConfig instance with separation parameters, or None for defaults.
-        debug: If True, emit verbose debug output.
-
-    Returns:
-        Path to the extracted vocals audio file, or the original file on failure.
-    """
-    # Extract config values (use defaults if config is None)
+    """Perform source separation using Demucs and generate timestamp JSON."""
+    
     chunk_length = config.chunk_length if config else 900
     model = config.model if config else "htdemucs_ft"
     two_stems = config.two_stems if config else "vocals"
@@ -74,7 +165,6 @@ def handle(
                 for line in process.stdout:
                     combined.append(line)
                     if line:
-                        # Handle progress bar output
                         payload = line.rstrip("\r\n")
                         is_progress = "%|" in payload and payload.lstrip().startswith(tuple("0123456789"))
                         if is_progress:
@@ -103,14 +193,13 @@ def handle(
                               stderr=subprocess.PIPE, text=True)
 
     def run_demucs(input_path: Path, output_root: Path) -> Optional[Path]:
-        """Run Demucs with GPU→CPU fallback, return output directory or None."""
+        """Run Demucs with GPU->CPU fallback."""
         for device in ("cuda", "cpu"):
             command = [
                 "audio", "-m", "demucs.separate", "-n", model,
                 f"--two-stems={two_stems}", str(input_path),
                 "-o", str(output_root), "--device", device,
             ]
-
             htdemucs_root = output_root / model
             if htdemucs_root.exists():
                 shutil.rmtree(htdemucs_root, ignore_errors=True)
@@ -119,138 +208,120 @@ def handle(
                 run_command(command)
             except subprocess.CalledProcessError as exc:
                 print(f"Command failed with return code {exc.returncode}")
-                if not debug:
-                    output_text = getattr(exc, "stdout", None) or getattr(exc, "output", None)
-                    if output_text:
-                        print(f"Output:\n{output_text}")
                 if device == "cuda":
                     print("WARN: Demucs GPU execution failed; retrying on CPU.")
                     continue
-                print("Error occurred during vocal separation. Using the original audio file.")
                 return None
             except Exception as exc:
                 print(f"An error occurred: {exc}")
                 if device == "cuda":
                     print("WARN: Demucs GPU execution failed; retrying on CPU.")
                     continue
-                print("Error occurred during vocal separation. Using the original audio file.")
                 return None
 
             demucs_output = output_root / model / input_path.stem
             if not demucs_output.exists():
-                print("WARN: Demucs output not found. Using the original audio file.")
-                if device == "cuda":
-                    print("WARN: Retrying Demucs on CPU.")
-                    continue
+                if device == "cuda": continue
                 return None
-
             return demucs_output
         return None
 
     def ensure_mono_16k(audio_path: Path) -> str:
         """Force WAV to mono/16kHz in-place."""
-        if not audio_path.exists():
-            return str(audio_path)
-
+        if not audio_path.exists(): return str(audio_path)
         tmp_path = audio_path.with_suffix(".tmp.wav")
         command = [
             "ffmpeg", "-hide_banner", "-loglevel", "info" if debug else "error",
             "-nostdin", "-y", "-i", str(audio_path), "-ac", "1", "-ar", "16000", str(tmp_path),
         ]
-
         try:
             run_command(command)
-        except subprocess.CalledProcessError as exc:
-            print(f"WARN: Failed to downmix stem to mono/16kHz (code {exc.returncode}); keeping original track.")
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-            return str(audio_path)
-        except FileNotFoundError:
-            print("WARN: ffmpeg not available to normalize stem audio; keeping original track.")
-            return str(audio_path)
-
-        try:
             shutil.move(tmp_path, audio_path)
-        except Exception as exc:
-            print(f"WARN: Failed to replace stem audio with normalized track: {exc}")
-            if tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-            return str(audio_path)
-
+        except Exception:
+            if tmp_path.exists(): tmp_path.unlink(missing_ok=True)
         return str(audio_path)
 
-    def finalize_single_run(demucs_output: Path) -> str:
-        """Copy single-file Demucs output to stem directory."""
-        if stem_dir.exists():
-            shutil.rmtree(stem_dir, ignore_errors=True)
-
-        try:
-            shutil.copytree(demucs_output, stem_dir)
-        except Exception as exc:
-            print(f"WARN: Failed to prepare stem directory: {exc}")
-            return input_file
-        finally:
-            htdemucs_dir = temp_path / model
-            if htdemucs_dir.exists():
-                shutil.rmtree(htdemucs_dir, ignore_errors=True)
-
+    def generate_json_and_finalize(final_output_path: Path) -> str:
+        """Analyze stems for timestamps and return the final vocals path."""
         vocals_path = stem_dir / f"{two_stems}.wav"
-        if not vocals_path.exists():
-            print("Vocals file not found after separation. Using the original audio file.")
-            return input_file
+        music_path = stem_dir / "no_vocals.wav" # Demucs default name for remainder
+        
+        # 1. Normalize Audio
+        if vocals_path.exists(): ensure_mono_16k(vocals_path)
+        if music_path.exists(): ensure_mono_16k(music_path)
+        
+        # 2. Detect Segments
+        print("INFO: Analyzing stems for start/end timestamps")
+        segments = []
+        
+        # Detect Vocals (Sensitivity: Medium)
+        # Onset -45dB: Ignores breath noise. Offset -60dB: Catches whisper endings.
+        segments.extend(detect_audio_segments(
+            vocals_path, "vocals", onset_db=-45.0, offset_db=-60.0, min_duration=0.2
+        ))
 
-        ensure_mono_16k(vocals_path)
-        return str(vocals_path)
+        # Detect Music (Sensitivity: Low)
+        # Onset -40dB: Ignores tape hiss. Offset -50dB: Strict cutoff.
+        segments.extend(detect_audio_segments(
+            music_path, "music", onset_db=-40.0, offset_db=-50.0, min_duration=0.5
+        ))
+        
+        # 3. Sort and Save JSON
+        segments.sort(key=lambda x: x["start"])
+        json_path = stem_dir / "stem.json"
+        
+        try:
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(segments, f, indent=2)
+        except Exception as e:
+            print(f"WARN: Failed to save stem.json: {e}")
 
-    # Process audio (single file or chunked)
+        # Return path to vocals
+        if vocals_path.exists():
+            return str(vocals_path)
+        
+        print("WARN: Vocals file missing. Returning original.")
+        return input_file
+
+    # --- Main Execution Logic ---
     try:
+        # Case A: No chunking needed
         if chunk_dir is None or len(chunks) <= 1:
             demucs_output = run_demucs(Path(input_file), temp_path)
             if demucs_output:
-                return finalize_single_run(demucs_output)
+                # Prepare stem dir
+                if stem_dir.exists(): shutil.rmtree(stem_dir)
+                shutil.copytree(demucs_output, stem_dir)
+                # Cleanup Demucs raw folder
+                shutil.rmtree(temp_path / model, ignore_errors=True)
+                
+                return generate_json_and_finalize(stem_dir)
             return input_file
 
-        print(f"INFO: Chunking stems into {len(chunks)} segments of up to {chunk_length} seconds")
-
-        if stem_dir.exists():
-            shutil.rmtree(stem_dir, ignore_errors=True)
+        # Case B: Chunking needed
+        print(f"INFO: Chunking stems into {len(chunks)} segments...")
+        if stem_dir.exists(): shutil.rmtree(stem_dir)
         stem_dir.mkdir(parents=True, exist_ok=True)
-
         stem_chunks: Dict[str, List[str]] = {}
 
         for index, chunk_path_str in enumerate(chunks):
             chunk_path = Path(chunk_path_str)
-            print(f"INFO: Processing stem chunk {index + 1}/{len(chunks)}: {chunk_path}")
-
+            print(f"INFO: Processing stem chunk {index + 1}/{len(chunks)}")
             with tempfile.TemporaryDirectory(dir=output_folder) as demucs_temp:
                 demucs_output = run_demucs(chunk_path, Path(demucs_temp))
-                if not demucs_output:
-                    raise RuntimeError(f"Demucs failed on chunk {chunk_path.name}")
-
+                if not demucs_output: raise RuntimeError("Demucs failed on chunk")
                 for stem_file in demucs_output.glob("*.wav"):
-                    stem_name = stem_file.name
-                    chunk_output = Path(chunk_dir) / f"{stem_name}_{index:05d}.wav"
+                    chunk_output = Path(chunk_dir) / f"{stem_file.name}_{index:05d}.wav"
                     shutil.copy2(stem_file, chunk_output)
-                    stem_chunks.setdefault(stem_name, []).append(str(chunk_output))
-
-        if not stem_chunks:
-            raise RuntimeError("Demucs did not produce any stems to merge.")
+                    stem_chunks.setdefault(stem_file.name, []).append(str(chunk_output))
 
         for stem_name, files in stem_chunks.items():
             concatenate_audio(files, str(stem_dir / stem_name), chunk_dir)
 
-        vocals_path = stem_dir / f"{two_stems}.wav"
-        if vocals_path.exists():
-            ensure_mono_16k(vocals_path)
-            return str(vocals_path)
-
-        print("WARN: Vocals file not found after chunked separation. Using the original audio file.")
-        return input_file
+        return generate_json_and_finalize(stem_dir)
 
     except Exception as exc:
-        print(f"WARN: Chunked separation failed: {exc}")
-        if stem_dir.exists():
-            shutil.rmtree(stem_dir, ignore_errors=True)
+        print(f"WARN: Process failed: {exc}")
         return input_file
     finally:
         cleanup_chunks(chunk_dir)
