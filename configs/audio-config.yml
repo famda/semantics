@@ -219,6 +219,23 @@ emotion:
   use_forced_alignment: true
 
 # ----------------------------------------------------------------------------
+# Named Entity Recognition Configuration
+# ----------------------------------------------------------------------------
+# Extract named entities (persons, organizations, locations, etc.) from
+# transcription segments.
+ner:
+  # HuggingFace model ID for NER
+  model_name: Jean-Baptiste/roberta-large-ner-english
+  # Device override: "cuda", "cpu", or null for auto-detection
+  device: null
+  # Batch size for inference (higher = faster but more memory)
+  batch_size: 8
+  # Minimum confidence threshold for entity detection (0.0-1.0)
+  confidence_threshold: 0.92
+  # Token aggregation strategy: simple, first, average, max
+  aggregate_strategy: simple
+
+# ----------------------------------------------------------------------------
 # Scenes / Chapters Configuration
 # ----------------------------------------------------------------------------
 # Chapter detection using embeddings and optional LLM for title generation.

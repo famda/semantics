@@ -116,6 +116,7 @@ atexit.register(_print_elapsed_time)
 )
 @click.option("-em", "--emotion", is_flag=True, help="Enable emotion recognition")
 @click.option("-se", "--scene", is_flag=True, help="Enable scene/chapter detection")
+@click.option("-ner", "--named-entities", is_flag=True, help="Extract named entities from transcript")
 @click.option("--debug", is_flag=True, help="Enable verbose debug logging")
 @click.option(
     "--config",
@@ -138,6 +139,7 @@ def main(
     classify_timeline: bool,
     emotion: bool,
     scene: bool,
+    named_entities: bool,
     debug: bool,
     config: Optional[str],
 ) -> None:
@@ -333,6 +335,36 @@ def main(
         else:
             click.echo(
                 "Error: Scene recognition requires transcription or CTC alignment. Skipping.",
+                err=True,
+            )
+
+    # Named Entity Recognition
+    if named_entities:
+        ctc_json = os.path.join(temp_folder, "ctc", "alignment.json")
+        transcript_json = os.path.join(
+            temp_folder, "transcription", "transcription.json"
+        )
+        ner_cfg = audio_config.ner if audio_config else None
+
+        segments_file = None
+        if ctc_align and os.path.exists(ctc_json):
+            segments_file = ctc_json
+        elif transcribe and os.path.exists(transcript_json):
+            segments_file = transcript_json
+
+        if segments_file:
+            from modules import entities as entities_module
+
+            entities_module.handle(
+                audio_file,
+                temp_folder,
+                config=ner_cfg,
+                segments_file=segments_file,
+                debug=debug,
+            )
+        else:
+            click.echo(
+                "Error: NER requires transcription or CTC alignment. Skipping.",
                 err=True,
             )
 

@@ -290,6 +290,30 @@ class ClassificationConfig(BaseModel):
     )
 
 
+class NerConfig(BaseModel):
+    """Configuration for Named Entity Recognition on video captions."""
+
+    model_name: str = Field(
+        default="Jean-Baptiste/roberta-large-ner-english",
+        description="HuggingFace model ID for NER",
+    )
+    device: Optional[str] = Field(
+        default=None, description="Device override (cuda/cpu/None=auto)"
+    )
+    batch_size: int = Field(default=8, description="Batch size for inference")
+    confidence_threshold: float = Field(
+        default=0.92, description="Minimum confidence for entity detection"
+    )
+    aggregate_strategy: str = Field(
+        default="simple",
+        description="Token aggregation strategy: simple, first, average, max",
+    )
+    caption_field: str = Field(
+        default="caption_more_detailed",
+        description="Caption field to use for NER: caption, caption_detailed, caption_more_detailed",
+    )
+
+
 class VideoConfig(BaseModel):
     """Root configuration for all video processing modules."""
 
@@ -332,6 +356,10 @@ class VideoConfig(BaseModel):
     classification: ClassificationConfig = Field(
         default_factory=ClassificationConfig,
         description="Image classification settings.",
+    )
+    ner: NerConfig = Field(
+        default_factory=NerConfig,
+        description="Named Entity Recognition settings.",
     )
 
 

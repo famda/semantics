@@ -283,6 +283,7 @@ Audio and speech processing toolkit.
 | `-ct, --classify-timeline` | Enable timeline audio classification |
 | `-em, --emotion` | Enable emotion recognition (requires `-t` or `-ctc`) |
 | `-se, --scene` | Enable scene/chapter detection (requires `-t` or `-ctc`) |
+| `-ner, --named-entities` | Extract named entities from transcript (requires `-t` or `-ctc`) |
 | `--debug` | Enable verbose debug logging |
 | `--config PATH` | Path to YAML config file |
 | `-h, --help` | Show help message |
@@ -314,6 +315,7 @@ Video analysis and object detection toolkit.
 | `-s, --scenes` | Enable scene extraction |
 | `-ocr, --extract-text` | Enable text extraction (OCR) |
 | `-cl, --classify` | Enable frame classification |
+| `-ner, --named-entities` | Extract named entities from captions (requires `-c`) |
 | `--download-resolution INT` | Max video height when downloading from URL |
 | `--save-frames` | Save extracted frames to disk |
 | `-fps, --frames-per-second INT` | Frames per second to analyze (default: 1) |
@@ -386,6 +388,7 @@ output_folder/
 ├── transcripts/        # Audio transcriptions (JSON, SRT, VTT)
 ├── diarization/        # Speaker diarization results
 ├── emotions/           # Emotion recognition data
+├── entities/           # Named entity recognition results
 ├── scenes/             # Scene/chapter detection
 ├── objects/            # Detected objects and crops
 ├── frames/             # Extracted video frames

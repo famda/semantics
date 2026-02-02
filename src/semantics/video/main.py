@@ -176,6 +176,7 @@ def _coerce_int(value) -> Optional[int]:
 @click.option("-s", "--scenes", is_flag=True, help="Enable scene extraction")
 @click.option("-ocr", "--extract-text", is_flag=True, help="Enable text extraction (OCR)")
 @click.option("-cl", "--classify", is_flag=True, help="Enable frame classification")
+@click.option("-ner", "--named-entities", is_flag=True, help="Extract named entities from captions")
 @click.option("--download-resolution", type=int, default=None, help="Max video height when downloading from URL")
 @click.option("--from-frames", is_flag=True, help="Analyze from extracted video frames")
 @click.option("--from-clustering", is_flag=True, help="Analyze from keyframe/clustering on frames")
@@ -196,6 +197,7 @@ def main(
     scenes: bool,
     extract_text: bool,
     classify: bool,
+    named_entities: bool,
     download_resolution: Optional[int],
     from_frames: bool,
     from_clustering: bool,
@@ -454,6 +456,27 @@ def main(
                 config=classification_cfg,
                 frame_indices=frame_indices_to_process,
                 save_annotations=save_annotations,
+                debug=debug,
+            )
+
+    # Named Entity Recognition (from captions)
+    if named_entities:
+        captions_json = os.path.join(temp_folder, "captions", "captions.json")
+        if not captions or not os.path.exists(captions_json):
+            click.echo(
+                "ERROR: NER requires captions. Use -c/--captions flag first.",
+                err=True,
+            )
+        else:
+            with gray_debug_output(debug):
+                from modules import entities as entities_module
+
+            ner_cfg = video_config.ner if video_config else None
+            entities_module.handle(
+                file,
+                temp_folder,
+                config=ner_cfg,
+                captions_file=captions_json,
                 debug=debug,
             )
 

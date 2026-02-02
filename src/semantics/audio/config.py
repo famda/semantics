@@ -412,6 +412,31 @@ class ScenesConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Named Entity Recognition Config
+# ---------------------------------------------------------------------------
+
+
+class NerConfig(BaseModel):
+    """Configuration for Named Entity Recognition on transcription segments."""
+
+    model_name: str = Field(
+        default="Jean-Baptiste/roberta-large-ner-english",
+        description="HuggingFace model ID for NER",
+    )
+    device: Optional[str] = Field(
+        default=None, description="Device override (cuda/cpu/None=auto)"
+    )
+    batch_size: int = Field(default=8, description="Batch size for inference")
+    confidence_threshold: float = Field(
+        default=0.92, description="Minimum confidence for entity detection"
+    )
+    aggregate_strategy: str = Field(
+        default="simple",
+        description="Token aggregation strategy: simple, first, average, max",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Root Audio Config
 # ---------------------------------------------------------------------------
 
@@ -434,6 +459,7 @@ class AudioConfig(BaseModel):
     classify_timeline: TimelineConfig = Field(default_factory=TimelineConfig)
     emotion: EmotionConfig = Field(default_factory=EmotionConfig)
     scenes: ScenesConfig = Field(default_factory=ScenesConfig)
+    ner: NerConfig = Field(default_factory=NerConfig)
 
 
 # ---------------------------------------------------------------------------
