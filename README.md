@@ -313,6 +313,7 @@ Video analysis and object detection toolkit.
 | `-c, --captions` | Extract captions from the video |
 | `-s, --scenes` | Enable scene extraction |
 | `-ocr, --extract-text` | Enable text extraction (OCR) |
+| `-cl, --classify` | Enable frame classification |
 | `--download-resolution INT` | Max video height when downloading from URL |
 | `--save-frames` | Save extracted frames to disk |
 | `-fps, --frames-per-second INT` | Frames per second to analyze (default: 1) |
