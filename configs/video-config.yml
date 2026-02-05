@@ -215,6 +215,70 @@ scenes:
   use_codec_copy: false
 
 # -----------------------------------------------------------------------------
+# Action Recognition Configuration
+# -----------------------------------------------------------------------------
+actions:
+  # HuggingFace model for action recognition
+  # Recommended: "MCG-NJU/videomae-large-finetuned-kinetics" (most accurate, 16 frames)
+  # Alternative: "MCG-NJU/videomae-base-finetuned-kinetics" (faster)
+  # Alternative: "facebook/timesformer-base-finetuned-k400" (fastest, 8 frames)
+  model: "MCG-NJU/videomae-base-finetuned-kinetics"
+
+  # Number of frames to sample per clip (must match model requirements)
+  # VideoMAE: 16 frames, TimeSformer: 8 frames
+  num_frames: 16
+
+  # Frame sample rate - sample every n-th frame
+  # Temporal span = num_frames * frame_sample_rate frames
+  # Example: 16 frames * 4 = 64 frame span (~2.1s at 30fps)
+  # Higher values = longer clips that capture full actions
+  frame_sample_rate: 4
+
+  # Minimum confidence threshold for action predictions (0.0 - 1.0)
+  # Lower values capture more actions but may include false positives
+  conf_threshold: 0.40
+
+  # Number of top action predictions to return per clip
+  top_k: 3
+
+  # Batch size for processing video clips (reduce for OOM errors)
+  # Higher values are faster with more GPU parallelism (8 for RTX 6GB+)
+  batch_size: 8
+
+  # Save video clips for each detected action to actions/clips/ folder
+  save_clips: true
+
+  # === Clip Coverage Settings ===
+  # Controls how clips are placed within activity segments for analysis
+
+  # Overlap ratio (0.0-1.0) between consecutive clips in activity segments
+  # 0.75 = 75% overlap for thorough coverage, 0.0 = no overlap
+  clip_overlap: 0.75
+
+  # Seconds of padding for temporal context
+  # Applied to: 1) activity segments during analysis, 2) saved action clips
+  # Helps capture the start/end of actions and adds context to exported clips
+  padding: 1.0
+
+  # === Activity Pre-Scan Settings ===
+  # The module uses a fast motion-based pre-scan to identify active regions
+  # before running the expensive action recognition model.
+
+  # Frames per second to analyze during activity scan
+  # Higher = more accurate motion detection but slower
+  scan_fps: 2.0
+
+  # Minimum motion ratio (0.0-1.0) to consider a frame as active
+  # 0.02 = 2% of pixels changed between frames
+  motion_threshold: 0.02
+
+  # Minimum duration in seconds for an activity segment to be analyzed
+  min_activity_duration: 0.5
+
+  # Maximum gap in seconds between activity segments to merge them
+  merge_gap: 1.0
+
+# -----------------------------------------------------------------------------
 # Image Classification Configuration (YOLO Classification)
 # -----------------------------------------------------------------------------
 classification:

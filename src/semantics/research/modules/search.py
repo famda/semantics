@@ -19,13 +19,31 @@ from ddgs.exceptions import DDGSException, TimeoutException
 
 
 _LOGGER = logging.getLogger(__name__)
-_DEFAULT_MAX_RESULTS = 100
 _SAFESEARCH_LEVEL = "moderate"
 _REGION = "us-en"
 _QUERY_TOKEN_PATTERN = re.compile(r"\w+")
 _MAX_RETRIES = 3
 _RETRY_DELAY_SECONDS = 2.0
 _VIDEO_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+
+
+def _get_search_defaults() -> dict:
+	"""Get default values from SearchConfig to avoid circular imports."""
+	try:
+		from config import SearchConfig
+		cfg = SearchConfig()
+		return {
+			"max_results": cfg.max_results,
+			"safesearch": cfg.safesearch,
+			"region": cfg.region,
+		}
+	except Exception:
+		# Fallback defaults if config import fails
+		return {
+			"max_results": 100,
+			"safesearch": "moderate",
+			"region": "us-en",
+		}
 
 
 def _with_retries(func, *, description: str, debug: bool):
@@ -84,9 +102,11 @@ def _classify_url(url: str) -> str:
 def search_content(
 	query: str,
 	debug: bool = False,
-	max_results: int = _DEFAULT_MAX_RESULTS,
+	max_results: int | None = None,
 ) -> Dict[str, object]:
 	"""Execute web and video searches for *query* and return aggregated results."""
+	defaults = _get_search_defaults()
+	max_results = max_results if max_results is not None else defaults["max_results"]
 
 	if not query or not query.strip():
 		raise ValueError("Query must be a non-empty string.")
@@ -309,7 +329,7 @@ def search_content(
 def search_web(
 	query: str,
 	debug: bool = False,
-	max_results: int = _DEFAULT_MAX_RESULTS,
+	max_results: int | None = None,
 ) -> List[Dict[str, object]]:
 	"""Backward-compatible helper returning only web results."""
 
@@ -354,9 +374,10 @@ def handle(
 	Returns:
 		Dictionary containing search results.
 	"""
+	defaults = _get_search_defaults()
 	resolved_max = max_results
 	if resolved_max is None:
-		resolved_max = config.max_results if config else _DEFAULT_MAX_RESULTS
+		resolved_max = config.max_results if config else defaults["max_results"]
 
 	payload = search_content(query, debug=debug, max_results=resolved_max)
 	save_results_to_json(payload, output_folder)

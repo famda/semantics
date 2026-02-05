@@ -256,6 +256,70 @@ class ScenesConfig(BaseModel):
     )
 
 
+class ActionsConfig(BaseModel):
+    """Configuration for action recognition in video.
+    
+    Uses transformer-based models (TimeSformer, VideoMAE) to recognize
+    human actions in video clips with temporal understanding.
+    
+    The module uses motion-based activity scanning to intelligently select
+    clips for analysis, focusing on areas with actual motion/activity.
+    """
+
+    model: str = Field(
+        default="MCG-NJU/videomae-base-finetuned-kinetics",
+        description="HuggingFace model ID for action recognition. Options: MCG-NJU/videomae-large-finetuned-kinetics (recommended, 16 frames), MCG-NJU/videomae-base-finetuned-kinetics (faster), facebook/timesformer-base-finetuned-k400 (fastest, 8 frames).",
+    )
+    num_frames: int = Field(
+        default=16,
+        description="Number of frames to sample per clip. Must match model requirements (8 for TimeSformer, 16 for VideoMAE).",
+    )
+    frame_sample_rate: int = Field(
+        default=4,
+        description="Sample every n-th frame. Temporal span = num_frames * frame_sample_rate frames. Higher values capture longer actions (default 4 = ~2.1s clips at 30fps).",
+    )
+    conf_threshold: float = Field(
+        default=0.40,
+        description="Minimum confidence threshold for action predictions (0.0 - 1.0). Lower values capture more actions but may include false positives.",
+    )
+    top_k: int = Field(
+        default=3,
+        description="Number of top action predictions to return per clip.",
+    )
+    batch_size: int = Field(
+        default=8,
+        description="Batch size for processing video clips. Higher = faster with more GPU parallelism (default 8 for RTX 6GB+).",
+    )
+    save_clips: bool = Field(
+        default=True,
+        description="Save video clips for each detected action to actions/clips/ folder.",
+    )
+    padding: float = Field(
+        default=1.0,
+        description="Seconds of padding for temporal context. Applied to activity segments during scanning and to saved action clips.",
+    )
+    clip_overlap: float = Field(
+        default=0.75,
+        description="Overlap ratio (0.0-1.0) between consecutive clips in activity segments. 0.75 = 75% overlap for thorough coverage.",
+    )
+    scan_fps: float = Field(
+        default=1.0,
+        description="Frames per second to analyze during activity pre-scan. Higher = more accurate but slower.",
+    )
+    motion_threshold: float = Field(
+        default=0.02,
+        description="Minimum motion ratio (0.0-1.0) to consider a frame as active. 0.02 = 2% of pixels changed.",
+    )
+    min_activity_duration: float = Field(
+        default=0.5,
+        description="Minimum duration in seconds for an activity segment to be analyzed.",
+    )
+    merge_gap: float = Field(
+        default=1.0,
+        description="Maximum gap in seconds between activity segments to merge them.",
+    )
+
+
 class OcrConfig(BaseModel):
     """Configuration for EasyOCR-based text extraction."""
 
@@ -348,6 +412,10 @@ class VideoConfig(BaseModel):
     scenes: ScenesConfig = Field(
         default_factory=ScenesConfig,
         description="Scene splitting settings.",
+    )
+    actions: ActionsConfig = Field(
+        default_factory=ActionsConfig,
+        description="Action recognition settings.",
     )
     ocr: OcrConfig = Field(
         default_factory=OcrConfig,

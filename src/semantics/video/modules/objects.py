@@ -42,64 +42,97 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 # =============================================================================
-# Default Constants (never mutated at runtime)
+# Module-level Constants (filtering, not configuration)
 # =============================================================================
-
-DEFAULT_DETECTION_MODEL = "yolo11s.pt"
-DEFAULT_SEGMENTATION_MODEL = "yolo11s-seg.pt"
-DEFAULT_POSE_MODEL = "yolo11s-pose.pt"
-DEFAULT_OBJECT_CONF_THRESHOLD = 0.80
-DEFAULT_IOU_MATCH_THRESHOLD = 0.5
-DEFAULT_KEYPOINT_CONF_THRESHOLD = 0.6
-DEFAULT_FACE_CONF_THRESHOLD = 0.9
-DEFAULT_EMBEDDING_MODEL_NAME = "Facenet512"
-DEFAULT_FACE_DETECT_MIN_SIDE = 720
-DEFAULT_FACE_DETECT_MAX_SCALE = 2.0
-DEFAULT_DETECTOR_BACKEND = "retinaface"
 
 VALID_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp")
 EXCLUDED_CLUSTER_MARKERS = ("_ann", "_mask", "_background", "_polygon", "_msk")
-
-DEFAULT_CLIP_MODEL_NAME = "ViT-B/32"
-DEFAULT_CLUSTER_BASE_EPS = 0.35
-DEFAULT_CLUSTER_MIN_SAMPLES = 1
-DEFAULT_CLUSTER_MIN_ATTEMPTS = 4
-DEFAULT_KEYFRAME_EPS = 0.12
-DEFAULT_KEYFRAME_MIN_SAMPLES = 1
-DEFAULT_KEYFRAME_HAMMING_FRAC = 0.30
-DEFAULT_KEYFRAME_REQUIRE_BOTH = True
 
 
 # =============================================================================
 # Internal Settings Dataclass
 # =============================================================================
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+def _get_objects_defaults() -> dict:
+    """Get default values from ObjectsConfig to avoid circular imports."""
+    try:
+        from config import ObjectsConfig
+        cfg = ObjectsConfig()
+        return {
+            "detection_model": cfg.detection_model,
+            "segmentation_model": cfg.segmentation_model,
+            "pose_model": cfg.pose_model,
+            "object_conf_threshold": cfg.object_conf_threshold,
+            "iou_match_threshold": cfg.iou_match_threshold,
+            "keypoint_conf_threshold": cfg.keypoint_conf_threshold,
+            "face_conf_threshold": cfg.face_conf_threshold,
+            "embedding_model_name": cfg.embedding_model_name,
+            "face_detect_min_side": cfg.face_detect_min_side,
+            "face_detect_max_scale": cfg.face_detect_max_scale,
+            "detector_backend": cfg.detector_backend,
+            "clip_model_name": cfg.clip_model_name,
+            "cluster_base_eps": cfg.cluster_base_eps,
+            "cluster_min_samples": cfg.cluster_min_samples,
+            "cluster_min_attempts": cfg.cluster_min_attempts,
+            "keyframe_eps": cfg.keyframe_eps,
+            "keyframe_min_samples": cfg.keyframe_min_samples,
+            "keyframe_hamming_frac": cfg.keyframe_hamming_frac,
+            "keyframe_require_both": cfg.keyframe_require_both,
+        }
+    except Exception:
+        # Fallback defaults if config import fails
+        return {
+            "detection_model": "yolo11s.pt",
+            "segmentation_model": "yolo11s-seg.pt",
+            "pose_model": "yolo11s-pose.pt",
+            "object_conf_threshold": 0.80,
+            "iou_match_threshold": 0.5,
+            "keypoint_conf_threshold": 0.6,
+            "face_conf_threshold": 0.9,
+            "embedding_model_name": "Facenet512",
+            "face_detect_min_side": 720,
+            "face_detect_max_scale": 2.0,
+            "detector_backend": "retinaface",
+            "clip_model_name": "ViT-B/32",
+            "cluster_base_eps": 0.35,
+            "cluster_min_samples": 1,
+            "cluster_min_attempts": 4,
+            "keyframe_eps": 0.12,
+            "keyframe_min_samples": 1,
+            "keyframe_hamming_frac": 0.30,
+            "keyframe_require_both": True,
+        }
 
 
 @dataclass
 class _ObjectsSettings:
-    """Internal settings container for objects module."""
+    """Internal settings container for objects module.
+    
+    Defaults are sourced from ObjectsConfig in config.py.
+    """
 
-    detection_model: str = DEFAULT_DETECTION_MODEL
-    segmentation_model: str = DEFAULT_SEGMENTATION_MODEL
-    pose_model: str = DEFAULT_POSE_MODEL
-    object_conf_threshold: float = DEFAULT_OBJECT_CONF_THRESHOLD
-    iou_match_threshold: float = DEFAULT_IOU_MATCH_THRESHOLD
-    keypoint_conf_threshold: float = DEFAULT_KEYPOINT_CONF_THRESHOLD
-    face_conf_threshold: float = DEFAULT_FACE_CONF_THRESHOLD
-    embedding_model_name: str = DEFAULT_EMBEDDING_MODEL_NAME
-    face_detect_min_side: int = DEFAULT_FACE_DETECT_MIN_SIDE
-    face_detect_max_scale: float = DEFAULT_FACE_DETECT_MAX_SCALE
-    detector_backend: str = DEFAULT_DETECTOR_BACKEND
-    clip_model_name: str = DEFAULT_CLIP_MODEL_NAME
-    cluster_base_eps: float = DEFAULT_CLUSTER_BASE_EPS
-    cluster_min_samples: int = DEFAULT_CLUSTER_MIN_SAMPLES
-    cluster_min_attempts: int = DEFAULT_CLUSTER_MIN_ATTEMPTS
-    keyframe_eps: float = DEFAULT_KEYFRAME_EPS
-    keyframe_min_samples: int = DEFAULT_KEYFRAME_MIN_SAMPLES
-    keyframe_hamming_frac: float = DEFAULT_KEYFRAME_HAMMING_FRAC
-    keyframe_require_both: bool = DEFAULT_KEYFRAME_REQUIRE_BOTH
+    detection_model: str = field(default_factory=lambda: _get_objects_defaults()["detection_model"])
+    segmentation_model: str = field(default_factory=lambda: _get_objects_defaults()["segmentation_model"])
+    pose_model: str = field(default_factory=lambda: _get_objects_defaults()["pose_model"])
+    object_conf_threshold: float = field(default_factory=lambda: _get_objects_defaults()["object_conf_threshold"])
+    iou_match_threshold: float = field(default_factory=lambda: _get_objects_defaults()["iou_match_threshold"])
+    keypoint_conf_threshold: float = field(default_factory=lambda: _get_objects_defaults()["keypoint_conf_threshold"])
+    face_conf_threshold: float = field(default_factory=lambda: _get_objects_defaults()["face_conf_threshold"])
+    embedding_model_name: str = field(default_factory=lambda: _get_objects_defaults()["embedding_model_name"])
+    face_detect_min_side: int = field(default_factory=lambda: _get_objects_defaults()["face_detect_min_side"])
+    face_detect_max_scale: float = field(default_factory=lambda: _get_objects_defaults()["face_detect_max_scale"])
+    detector_backend: str = field(default_factory=lambda: _get_objects_defaults()["detector_backend"])
+    clip_model_name: str = field(default_factory=lambda: _get_objects_defaults()["clip_model_name"])
+    cluster_base_eps: float = field(default_factory=lambda: _get_objects_defaults()["cluster_base_eps"])
+    cluster_min_samples: int = field(default_factory=lambda: _get_objects_defaults()["cluster_min_samples"])
+    cluster_min_attempts: int = field(default_factory=lambda: _get_objects_defaults()["cluster_min_attempts"])
+    keyframe_eps: float = field(default_factory=lambda: _get_objects_defaults()["keyframe_eps"])
+    keyframe_min_samples: int = field(default_factory=lambda: _get_objects_defaults()["keyframe_min_samples"])
+    keyframe_hamming_frac: float = field(default_factory=lambda: _get_objects_defaults()["keyframe_hamming_frac"])
+    keyframe_require_both: bool = field(default_factory=lambda: _get_objects_defaults()["keyframe_require_both"])
 
 
 # =============================================================================
@@ -348,7 +381,7 @@ def _list_valid_images(folder: str) -> List[str]:
 
 def _ensure_clip_resources(
     debug: bool,
-    clip_model_name: str = DEFAULT_CLIP_MODEL_NAME,
+    clip_model_name: str,
 ) -> Tuple[Optional[Any], Optional[Any], Optional[torch.device]]:
     global _CLIP_MODEL, _CLIP_PREPROCESS, _CLIP_DEVICE
     if _CLIP_MODEL is not None and _CLIP_PREPROCESS is not None and _CLIP_DEVICE is not None:
@@ -373,7 +406,7 @@ def _extract_clip_features(
     image_paths: Sequence[str],
     *,
     debug: bool,
-    clip_model_name: str = DEFAULT_CLIP_MODEL_NAME,
+    clip_model_name: str,
     batch_size: int = 32,
 ) -> Dict[str, np.ndarray]:
     """Extract CLIP features from images with batch processing for performance.
@@ -684,14 +717,14 @@ def _cluster_class_directory(
     image_folder: str,
     *,
     debug: bool,
-    base_eps: float = DEFAULT_CLUSTER_BASE_EPS,
-    min_samples: int = DEFAULT_CLUSTER_MIN_SAMPLES,
-    key_eps: float = DEFAULT_KEYFRAME_EPS,
-    key_min_samples: int = DEFAULT_KEYFRAME_MIN_SAMPLES,
-    key_hamming_frac: float = DEFAULT_KEYFRAME_HAMMING_FRAC,
-    key_require_both: bool = DEFAULT_KEYFRAME_REQUIRE_BOTH,
-    cluster_min_attempts: int = DEFAULT_CLUSTER_MIN_ATTEMPTS,
-    clip_model_name: str = DEFAULT_CLIP_MODEL_NAME,
+    base_eps: float,
+    min_samples: int,
+    key_eps: float,
+    key_min_samples: int,
+    key_hamming_frac: float,
+    key_require_both: bool,
+    cluster_min_attempts: int,
+    clip_model_name: str,
 ) -> Optional[Dict[str, Any]]:
     images = _list_valid_images(image_folder)
     if not images:
@@ -834,7 +867,7 @@ def _match_segmentation(
     bbox: np.ndarray,
     seg_detections: Optional[sv.Detections],
     *,
-    iou_match_threshold: float = DEFAULT_IOU_MATCH_THRESHOLD,
+    iou_match_threshold: float,
 ) -> Optional[Tuple[int, np.ndarray]]:
     if (
         seg_detections is None
@@ -924,8 +957,8 @@ def _match_keypoints(
     keypoints: Optional[sv.KeyPoints],
     class_name: str,
     *,
-    keypoint_conf_threshold: float = DEFAULT_KEYPOINT_CONF_THRESHOLD,
-    iou_match_threshold: float = DEFAULT_IOU_MATCH_THRESHOLD,
+    keypoint_conf_threshold: float,
+    iou_match_threshold: float,
 ) -> List[Dict[str, Any]]:
     if (
         keypoint_detections is None
@@ -1050,28 +1083,31 @@ def handle(
     """
     print("INFO: Detecting objects present in the frames")
 
-    # Extract ALL config values upfront with inline defaults
-    settings = _ObjectsSettings(
-        detection_model=config.detection_model if config else DEFAULT_DETECTION_MODEL,
-        segmentation_model=config.segmentation_model if config else DEFAULT_SEGMENTATION_MODEL,
-        pose_model=config.pose_model if config else DEFAULT_POSE_MODEL,
-        object_conf_threshold=config.object_conf_threshold if config else DEFAULT_OBJECT_CONF_THRESHOLD,
-        iou_match_threshold=config.iou_match_threshold if config else DEFAULT_IOU_MATCH_THRESHOLD,
-        keypoint_conf_threshold=config.keypoint_conf_threshold if config else DEFAULT_KEYPOINT_CONF_THRESHOLD,
-        face_conf_threshold=config.face_conf_threshold if config else DEFAULT_FACE_CONF_THRESHOLD,
-        embedding_model_name=config.embedding_model_name if config else DEFAULT_EMBEDDING_MODEL_NAME,
-        face_detect_min_side=config.face_detect_min_side if config else DEFAULT_FACE_DETECT_MIN_SIDE,
-        face_detect_max_scale=config.face_detect_max_scale if config else DEFAULT_FACE_DETECT_MAX_SCALE,
-        detector_backend=config.detector_backend if config else DEFAULT_DETECTOR_BACKEND,
-        clip_model_name=config.clip_model_name if config else DEFAULT_CLIP_MODEL_NAME,
-        cluster_base_eps=config.cluster_base_eps if config else DEFAULT_CLUSTER_BASE_EPS,
-        cluster_min_samples=config.cluster_min_samples if config else DEFAULT_CLUSTER_MIN_SAMPLES,
-        cluster_min_attempts=config.cluster_min_attempts if config else DEFAULT_CLUSTER_MIN_ATTEMPTS,
-        keyframe_eps=config.keyframe_eps if config else DEFAULT_KEYFRAME_EPS,
-        keyframe_min_samples=config.keyframe_min_samples if config else DEFAULT_KEYFRAME_MIN_SAMPLES,
-        keyframe_hamming_frac=config.keyframe_hamming_frac if config else DEFAULT_KEYFRAME_HAMMING_FRAC,
-        keyframe_require_both=config.keyframe_require_both if config else DEFAULT_KEYFRAME_REQUIRE_BOTH,
-    )
+    # Extract ALL config values upfront - use config values or ObjectsSettings defaults
+    if config:
+        settings = _ObjectsSettings(
+            detection_model=config.detection_model,
+            segmentation_model=config.segmentation_model,
+            pose_model=config.pose_model,
+            object_conf_threshold=config.object_conf_threshold,
+            iou_match_threshold=config.iou_match_threshold,
+            keypoint_conf_threshold=config.keypoint_conf_threshold,
+            face_conf_threshold=config.face_conf_threshold,
+            embedding_model_name=config.embedding_model_name,
+            face_detect_min_side=config.face_detect_min_side,
+            face_detect_max_scale=config.face_detect_max_scale,
+            detector_backend=config.detector_backend,
+            clip_model_name=config.clip_model_name,
+            cluster_base_eps=config.cluster_base_eps,
+            cluster_min_samples=config.cluster_min_samples,
+            cluster_min_attempts=config.cluster_min_attempts,
+            keyframe_eps=config.keyframe_eps,
+            keyframe_min_samples=config.keyframe_min_samples,
+            keyframe_hamming_frac=config.keyframe_hamming_frac,
+            keyframe_require_both=config.keyframe_require_both,
+        )
+    else:
+        settings = _ObjectsSettings()
 
     return _detect(
         input_file,

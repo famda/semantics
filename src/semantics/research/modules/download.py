@@ -11,7 +11,21 @@ if TYPE_CHECKING:
     from ..config import DownloadConfig
 
 
-DEFAULT_FILENAME_TEMPLATE = "%(title)s_%(id)s.%(ext)s"
+def _get_download_defaults() -> dict:
+    """Get default values from DownloadConfig to avoid circular imports."""
+    try:
+        from config import DownloadConfig
+        cfg = DownloadConfig()
+        return {
+            "filename_template": cfg.filename_template,
+            "max_height": cfg.max_height,
+        }
+    except Exception:
+        # Fallback defaults if config import fails
+        return {
+            "filename_template": "%(title)s_%(id)s.%(ext)s",
+            "max_height": 720,
+        }
 
 
 logger = logging.getLogger(__name__)
@@ -195,10 +209,13 @@ def _resolve_final_path(info_dict: Dict[str, Any], output_directory: str) -> str
 def download_video(
     url: str,
     output_folder: str,
-    filename_template: str = DEFAULT_FILENAME_TEMPLATE,
-    max_height: int | None = 720,
+    filename_template: str | None = None,
+    max_height: int | None = None,
 ) -> str | None:
     """Download a video using yt_dlp and return the absolute output path."""
+    defaults = _get_download_defaults()
+    filename_template = filename_template if filename_template is not None else defaults["filename_template"]
+    max_height = max_height if max_height is not None else defaults["max_height"]
 
     if not url:
         raise ValueError("url must be provided")
@@ -274,8 +291,9 @@ def handle(
     """
     set_verbose(debug)
 
-    filename_template = config.filename_template if config else DEFAULT_FILENAME_TEMPLATE
-    max_height = config.max_height if config else 720
+    defaults = _get_download_defaults()
+    filename_template = config.filename_template if config else defaults["filename_template"]
+    max_height = config.max_height if config else defaults["max_height"]
 
     downloaded_paths: List[str] = []
     for url in urls:

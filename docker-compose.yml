@@ -23,6 +23,8 @@ services:
        - ./.data/platform/workspaces:/workspaces
        - ./src/semantics/audio/modules:/platform/audio/modules
        - ./src/semantics/audio/main.py:/platform/audio/main.py
+       - ./src/semantics/audio/config.py:/platform/audio/config.py
+
     <<: *cuda-support
 
   worker-video:
@@ -40,6 +42,7 @@ services:
        - ./.data/platform/workspaces:/workspaces
        - ./src/semantics/video/modules:/platform/video/modules
        - ./src/semantics/video/main.py:/platform/video/main.py
+       - ./src/semantics/video/config.py:/platform/video/config.py
     <<: *cuda-support
 
   worker-research:
@@ -57,4 +60,29 @@ services:
        - ./.data/platform/workspaces:/workspaces
        - ./src/semantics/research/modules:/platform/research/modules
        - ./src/semantics/research/main.py:/platform/research/main.py
+       - ./src/semantics/research/config.py:/platform/research/config.py
+    <<: *cuda-support
+
+  worker:
+    build:
+      context: .
+      dockerfile: src/Dockerfile
+      args:
+        WORKER_TYPES: "audio,video,research"
+    tty: true
+    environment:
+      - TF_ENABLE_ONEDNN_OPTS=0
+      - TF_DISABLE_XLA=1
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    volumes:
+       - ./.data/platform/workspaces:/workspaces
+       - ./src/semantics/research/modules:/platform/research/modules
+       - ./src/semantics/research/main.py:/platform/research/main.py
+       - ./src/semantics/research/config.py:/platform/research/config.py
+       - ./src/semantics/audio/modules:/platform/audio/modules
+       - ./src/semantics/audio/main.py:/platform/audio/main.py
+       - ./src/semantics/audio/config.py:/platform/audio/config.py
+       - ./src/semantics/video/modules:/platform/video/modules
+       - ./src/semantics/video/main.py:/platform/video/main.py
+       - ./src/semantics/video/config.py:/platform/video/config.py
     <<: *cuda-support

@@ -20,7 +20,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker: [audio, video, research]
+        include:
+          - worker: audio
+            worker_types: audio
+          - worker: video
+            worker_types: video
+          - worker: research
+            worker_types: research
+          - worker: cli
+            worker_types: "audio,video,research"
 
     steps:
       - name: Checkout repository
@@ -56,7 +64,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            WORKER_TYPES=${{ matrix.worker }}
+            WORKER_TYPES=${{ matrix.worker_types }}
           cache-from: type=gha,scope=${{ matrix.worker }}
           cache-to: type=gha,mode=max,scope=${{ matrix.worker }}
 
@@ -83,10 +91,12 @@ jobs:
             - `famda/semantics:audio-latest`
             - `famda/semantics:video-latest`
             - `famda/semantics:research-latest`
+            - `famda/semantics:cli-latest`
 
             Pull with:
             ```bash
             docker pull famda/semantics:audio-latest
             docker pull famda/semantics:video-latest
             docker pull famda/semantics:research-latest
+            docker pull famda/semantics:cli-latest
             ```

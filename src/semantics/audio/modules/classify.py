@@ -33,14 +33,27 @@ except ImportError as e:
     exit(1)
 
 
-# Default constants (can be overridden via ClassifyConfig)
-DEFAULT_MODEL_ID = "MIT/ast-finetuned-audioset-10-10-0.4593"
-DEFAULT_EXPECTED_SAMPLE_RATE = 16000
-DEFAULT_TOP_N = 5
+def _get_classify_defaults() -> dict:
+    """Get default values from ClassifyConfig to avoid circular imports."""
+    try:
+        from config import ClassifyConfig
+        cfg = ClassifyConfig()
+        return {
+            "model_id": cfg.model_id,
+            "expected_sample_rate": cfg.expected_sample_rate,
+            "chunk_length": cfg.chunk_length,
+            "top_n": cfg.top_n,
+        }
+    except Exception:
+        # Fallback defaults if config import fails
+        return {
+            "model_id": "MIT/ast-finetuned-audioset-10-10-0.4593",
+            "expected_sample_rate": 16000,
+            "chunk_length": 900,
+            "top_n": 5,
+        }
 
-# Aliases for backward compatibility
-MODEL_ID = DEFAULT_MODEL_ID
-EXPECTED_SAMPLE_RATE = DEFAULT_EXPECTED_SAMPLE_RATE
+
 _MODEL_CACHE: Dict[
     str, Tuple[AutoFeatureExtractor, AutoModelForAudioClassification, torch.device]
 ] = {}
@@ -56,7 +69,7 @@ def _debug(message: str, *, debug: bool) -> None:
 
 def _classification_components(
     *,
-    model_id: str = MODEL_ID,
+    model_id: str,
     debug: bool = False,
 ) -> Tuple[AutoFeatureExtractor, AutoModelForAudioClassification, torch.device]:
     """Lazily load and cache the AST model + feature extractor on first use."""
@@ -102,12 +115,13 @@ def handle(
     Returns:
         Dictionary with classification results including category and top classes.
     """
-    chunk_length = config.chunk_length if config else DEFAULT_CHUNK_LENGTH_SECONDS
-    model_id = config.model_id if config else DEFAULT_MODEL_ID
+    defaults = _get_classify_defaults()
+    chunk_length = config.chunk_length if config else defaults["chunk_length"]
+    model_id = config.model_id if config else defaults["model_id"]
     expected_sample_rate = (
-        config.expected_sample_rate if config else DEFAULT_EXPECTED_SAMPLE_RATE
+        config.expected_sample_rate if config else defaults["expected_sample_rate"]
     )
-    top_n = config.top_n if config else DEFAULT_TOP_N
+    top_n = config.top_n if config else defaults["top_n"]
 
     return classify(
         input_file,
@@ -123,17 +137,22 @@ def handle(
 def classify(
     audio_file,
     output_folder,
-    chunk_length: int = DEFAULT_CHUNK_LENGTH_SECONDS,
+    chunk_length: int | None = None,
     *,
-    model_id: str = DEFAULT_MODEL_ID,
-    expected_sample_rate: int = DEFAULT_EXPECTED_SAMPLE_RATE,
-    top_n: int = DEFAULT_TOP_N,
+    model_id: str | None = None,
+    expected_sample_rate: int | None = None,
+    top_n: int | None = None,
     debug: bool = False,
 ):
     """Legacy wrapper for audio classification.
 
     Use :func:`handle` for new code.
     """
+    defaults = _get_classify_defaults()
+    chunk_length = chunk_length if chunk_length is not None else defaults["chunk_length"]
+    model_id = model_id if model_id is not None else defaults["model_id"]
+    expected_sample_rate = expected_sample_rate if expected_sample_rate is not None else defaults["expected_sample_rate"]
+    top_n = top_n if top_n is not None else defaults["top_n"]
 
     _info("INFO: Performing classification")
 

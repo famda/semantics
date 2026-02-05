@@ -177,6 +177,7 @@ def _coerce_int(value) -> Optional[int]:
 @click.option("-ocr", "--extract-text", is_flag=True, help="Enable text extraction (OCR)")
 @click.option("-cl", "--classify", is_flag=True, help="Enable frame classification")
 @click.option("-ner", "--named-entities", is_flag=True, help="Extract named entities from captions")
+@click.option("-a", "--actions", is_flag=True, help="Recognize human actions in the video")
 @click.option("--download-resolution", type=int, default=None, help="Max video height when downloading from URL")
 @click.option("--from-frames", is_flag=True, help="Analyze from extracted video frames")
 @click.option("--from-clustering", is_flag=True, help="Analyze from keyframe/clustering on frames")
@@ -198,6 +199,7 @@ def main(
     extract_text: bool,
     classify: bool,
     named_entities: bool,
+    actions: bool,
     download_resolution: Optional[int],
     from_frames: bool,
     from_clustering: bool,
@@ -215,8 +217,19 @@ def main(
     """
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0" if debug else "3"
 
-    # Validate that at least one frame selection mode is specified
-    if not (from_frames or from_clustering or from_segments):
+    # Check which modules require frame selection modes
+    needs_frame_selection = any([
+        tiles,
+        extract_objects,
+        captions,
+        scenes,
+        extract_text,
+        classify,
+        named_entities,
+    ])
+
+    # Validate that at least one frame selection mode is specified (if needed)
+    if needs_frame_selection and not (from_frames or from_clustering or from_segments):
         click.echo(
             "Error: You must specify a frame selection mode. Use one of:\n"
             "  --from-frames      Analyze from extracted video frames\n"
@@ -479,6 +492,19 @@ def main(
                 captions_file=captions_json,
                 debug=debug,
             )
+
+    # Action recognition
+    if actions:
+        with gray_debug_output(debug):
+            from modules import actions as actions_module
+
+        actions_cfg = video_config.actions if video_config else None
+        actions_module.handle(
+            file,
+            temp_folder,
+            config=actions_cfg,
+            debug=debug,
+        )
 
 
 if __name__ == "__main__":

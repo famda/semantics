@@ -27,7 +27,7 @@ import platform
 import re
 import time
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, cast
 
@@ -45,18 +45,33 @@ __all__ = ["handle"]
 
 
 # =============================================================================
-# Default Constants
+# Config Defaults Helper
 # =============================================================================
 
-# Use distil-whisper for faster inference while maintaining good accuracy.
-# This matches the same model used in standard transcription (distil-large-v3.5)
-# via faster-whisper for compatibility in A/B comparisons.
-DEFAULT_MODEL = "distil-whisper/distil-large-v3.5"
-# Chunk length for Whisper's native long-form transcription (30s is optimal)
-DEFAULT_CHUNK_LENGTH_S = 30
-DEFAULT_USE_FLASH_ATTENTION = True
-DEFAULT_ENABLE_CTC_REFINEMENT = True
-DEFAULT_CTC_MODEL = "stt_en_quartznet15x5"
+def _get_transcribe_experimental_defaults() -> dict:
+    """Get default values from TranscribeExperimentalConfig to avoid circular imports."""
+    try:
+        from config import TranscribeExperimentalConfig
+        cfg = TranscribeExperimentalConfig()
+        return {
+            "model": cfg.model,
+            "chunk_length_s": cfg.chunk_length_s,
+            "use_flash_attention": cfg.use_flash_attention,
+            "enable_ctc_refinement": cfg.enable_ctc_refinement,
+            "ctc_model": cfg.ctc_model,
+            "enable_diarization": cfg.enable_diarization,
+        }
+    except Exception:
+        # Fallback defaults if config import fails
+        return {
+            "model": "distil-whisper/distil-large-v3.5",
+            "chunk_length_s": 30,
+            "use_flash_attention": True,
+            "enable_ctc_refinement": True,
+            "ctc_model": "stt_en_quartznet15x5",
+            "enable_diarization": True,
+        }
+
 
 # Regex for sanitizing text for CTC alignment
 _SANITIZE_PATTERN = re.compile(r"[^a-z' ]+")
@@ -70,15 +85,18 @@ _APOSTROPHE_VARIANTS = {"\u2018": "'", "\u2019": "'", "\u02bc": "'"}
 
 @dataclass
 class _TranscribeSettings:
-    """Internal settings for transcription."""
+    """Internal settings for transcription.
+    
+    Defaults are sourced from TranscribeExperimentalConfig in config.py.
+    """
 
-    model: str = DEFAULT_MODEL
-    chunk_length_s: int = DEFAULT_CHUNK_LENGTH_S
-    use_flash_attention: bool = DEFAULT_USE_FLASH_ATTENTION
+    model: str = field(default_factory=lambda: _get_transcribe_experimental_defaults()["model"])
+    chunk_length_s: int = field(default_factory=lambda: _get_transcribe_experimental_defaults()["chunk_length_s"])
+    use_flash_attention: bool = field(default_factory=lambda: _get_transcribe_experimental_defaults()["use_flash_attention"])
     language: Optional[str] = None
-    enable_ctc_refinement: bool = DEFAULT_ENABLE_CTC_REFINEMENT
-    ctc_model: str = DEFAULT_CTC_MODEL
-    enable_diarization: bool = True
+    enable_ctc_refinement: bool = field(default_factory=lambda: _get_transcribe_experimental_defaults()["enable_ctc_refinement"])
+    ctc_model: str = field(default_factory=lambda: _get_transcribe_experimental_defaults()["ctc_model"])
+    enable_diarization: bool = field(default_factory=lambda: _get_transcribe_experimental_defaults()["enable_diarization"])
 
 
 # =============================================================================
@@ -1167,41 +1185,21 @@ def handle(
         "INFO: Starting experimental transcription (native long-form mode with diarization)"
     )
 
-    # Extract config values with inline defaults (per REFACTORING_PRINCIPLES.md)
-    model = config.model if config and config.model else DEFAULT_MODEL
-    chunk_length_s = (
-        config.chunk_length_s
-        if config and config.chunk_length_s
-        else DEFAULT_CHUNK_LENGTH_S
-    )
-    use_flash_attention = (
-        config.use_flash_attention
-        if config and config.use_flash_attention is not None
-        else DEFAULT_USE_FLASH_ATTENTION
-    )
-    language = config.language if config else None
-    enable_ctc_refinement = (
-        config.enable_ctc_refinement
-        if config and config.enable_ctc_refinement is not None
-        else DEFAULT_ENABLE_CTC_REFINEMENT
-    )
-    ctc_model = config.ctc_model if config and config.ctc_model else DEFAULT_CTC_MODEL
-    enable_diarization = (
-        config.enable_diarization
-        if config and config.enable_diarization is not None
-        else True
-    )
-
-    # Bundle into settings for internal functions
-    settings = _TranscribeSettings(
-        model=model,
-        chunk_length_s=chunk_length_s,
-        use_flash_attention=use_flash_attention,
-        language=language,
-        enable_ctc_refinement=enable_ctc_refinement,
-        ctc_model=ctc_model,
-        enable_diarization=enable_diarization,
-    )
+    # Extract config values using defaults helper (per REFACTORING_PRINCIPLES.md)
+    defaults = _get_transcribe_experimental_defaults()
+    
+    if config:
+        settings = _TranscribeSettings(
+            model=config.model,
+            chunk_length_s=config.chunk_length_s,
+            use_flash_attention=config.use_flash_attention,
+            language=config.language,
+            enable_ctc_refinement=config.enable_ctc_refinement,
+            ctc_model=config.ctc_model,
+            enable_diarization=config.enable_diarization,
+        )
+    else:
+        settings = _TranscribeSettings()
 
     debug_print(f"Model: {settings.model}", debug=debug)
     debug_print(f"Flash Attention: {settings.use_flash_attention}", debug=debug)

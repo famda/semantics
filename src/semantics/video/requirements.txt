@@ -13,6 +13,7 @@ PyYAML>=6.0.3
 opencv-python>=4.13.0.90
 scenedetect[opencv]>=0.6.7
 Pillow>=12.1.0
+av>=14.0.0
 
 # Object Detection & Recognition
 ultralytics>=8.4.6

@@ -23,10 +23,33 @@ from playwright.async_api import Error as PlaywrightError
 
 
 _LOGGER = logging.getLogger(__name__)
-_DEFAULT_WORD_COUNT_THRESHOLD = 50
-_DEFAULT_MAX_PAGES = 10
 _SETUP_LOCK = threading.Lock()
 _SETUP_COMPLETE = False
+
+
+def _get_crawl_defaults() -> dict:
+    """Get default values from CrawlConfig to avoid circular imports."""
+    try:
+        from config import CrawlConfig
+        cfg = CrawlConfig()
+        return {
+            "max_pages": cfg.max_pages,
+            "word_count_threshold": cfg.word_count_threshold,
+            "deep_crawl": cfg.deep_crawl,
+            "max_depth": cfg.max_depth,
+            "include_external": cfg.include_external,
+        }
+    except Exception:
+        # Fallback defaults if config import fails
+        return {
+            "max_pages": 10,
+            "word_count_threshold": 50,
+            "deep_crawl": False,
+            "max_depth": 1,
+            "include_external": False,
+        }
+
+
 _RETRYABLE_PLAYWRIGHT_SNIPPETS = (
     "target page, context or browser has been closed",
     "browser has been closed",
@@ -200,14 +223,22 @@ async def crawl_url_async(
     url: str,
     output_directory: Path | str,
     *,
-    deep_crawl: bool = False,
-    max_depth: int = 1,
-    max_pages: int = _DEFAULT_MAX_PAGES,
-    include_external: bool = False,
-    word_count_threshold: int = _DEFAULT_WORD_COUNT_THRESHOLD,
+    deep_crawl: bool | None = None,
+    max_depth: int | None = None,
+    max_pages: int | None = None,
+    include_external: bool | None = None,
+    word_count_threshold: int | None = None,
     debug: bool = False,
 ) -> List[Path]:
     """Asynchronously crawl *url* and write Markdown snapshots to *output_directory*."""
+
+    # Get defaults from config or fallback
+    defaults = _get_crawl_defaults()
+    max_pages = max_pages if max_pages is not None else defaults["max_pages"]
+    word_count_threshold = word_count_threshold if word_count_threshold is not None else defaults["word_count_threshold"]
+    deep_crawl = deep_crawl if deep_crawl is not None else defaults["deep_crawl"]
+    max_depth = max_depth if max_depth is not None else defaults["max_depth"]
+    include_external = include_external if include_external is not None else defaults["include_external"]
 
     if not url or not url.strip():
         raise ValueError("URL must be a non-empty string.")
@@ -300,14 +331,20 @@ def download_urls(
     urls: List[str],
     output_directory: Path | str,
     *,
-    deep_crawl: bool = False,
-    max_depth: int = 1,
-    max_pages: int = _DEFAULT_MAX_PAGES,
-    include_external: bool = False,
-    word_count_threshold: int = _DEFAULT_WORD_COUNT_THRESHOLD,
+    deep_crawl: bool | None = None,
+    max_depth: int | None = None,
+    max_pages: int | None = None,
+    include_external: bool | None = None,
+    word_count_threshold: int | None = None,
     debug: bool = False,
 ) -> List[Path]:
     """Download a batch of URLs into Markdown snapshots."""
+    defaults = _get_crawl_defaults()
+    deep_crawl = deep_crawl if deep_crawl is not None else defaults["deep_crawl"]
+    max_depth = max_depth if max_depth is not None else defaults["max_depth"]
+    max_pages = max_pages if max_pages is not None else defaults["max_pages"]
+    include_external = include_external if include_external is not None else defaults["include_external"]
+    word_count_threshold = word_count_threshold if word_count_threshold is not None else defaults["word_count_threshold"]
 
     if not urls:
         return []
@@ -368,20 +405,21 @@ def handle(
     Returns:
         List of paths to saved Markdown files.
     """
+    defaults = _get_crawl_defaults()
     resolved_deep = deep_crawl if deep_crawl is not None else (
-        config.deep_crawl if config else False
+        config.deep_crawl if config else defaults["deep_crawl"]
     )
     resolved_depth = max_depth if max_depth is not None else (
-        config.max_depth if config else 1
+        config.max_depth if config else defaults["max_depth"]
     )
     resolved_pages = max_pages if max_pages is not None else (
-        config.max_pages if config else _DEFAULT_MAX_PAGES
+        config.max_pages if config else defaults["max_pages"]
     )
     resolved_external = include_external if include_external is not None else (
-        config.include_external if config else False
+        config.include_external if config else defaults["include_external"]
     )
     resolved_threshold = word_count_threshold if word_count_threshold is not None else (
-        config.word_count_threshold if config else _DEFAULT_WORD_COUNT_THRESHOLD
+        config.word_count_threshold if config else defaults["word_count_threshold"]
     )
 
     return download_urls(
