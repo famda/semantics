@@ -154,8 +154,18 @@ objects:
   # Options: "ViT-B/32", "ViT-B/16", "ViT-L/14", etc.
   clip_model_name: "ViT-B/32"
 
-  # Base DBSCAN epsilon for object/face clustering
+  # Base DBSCAN epsilon for object clustering
   cluster_base_eps: 0.35
+
+  # Base DBSCAN epsilon for face clustering
+  face_cluster_base_eps: 0.20
+
+  # Cosine similarity threshold for near-duplicate pre-filtering before clustering.
+  # Crops above this similarity to the previous kept crop are collapsed.
+  cluster_dedup_threshold: 0.95
+
+  # Maximum cosine distance from nearest centroid before a crop goes to noise folder.
+  cluster_noise_max_distance: 0.60
 
   # DBSCAN min_samples for object clustering
   cluster_min_samples: 1

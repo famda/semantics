@@ -341,6 +341,7 @@ def main(
             file,
             temp_folder,
             config=clustering_cfg,
+            save_frames=save_frames,
             debug=debug,
         )
 

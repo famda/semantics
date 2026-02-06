@@ -5,9 +5,11 @@ import json
 import os
 import shutil
 import warnings
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, nullcontext
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, TYPE_CHECKING
+import queue
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import nullcontext
+from typing import Any, Dict, List, Optional, Sequence, TYPE_CHECKING
 
 import clip
 import cv2
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
 
 __all__ = ["handle"]
 
+# Environment optimizations
 os.environ["YOLO_VERBOSE"] = "False"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ.setdefault("TF_DISABLE_XLA", "1")
@@ -41,23 +44,17 @@ warnings.filterwarnings("ignore")
 if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
-# =============================================================================
-# Module-level Constants (filtering, not configuration)
-# =============================================================================
-
+# Constants
 VALID_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".webp")
 EXCLUDED_CLUSTER_MARKERS = ("_ann", "_mask", "_background", "_polygon", "_msk")
-
-
-# =============================================================================
-# Internal Settings Dataclass
-# =============================================================================
+SMART_SEEK_THRESHOLD = 32
+INFERENCE_BATCH_SIZE = 8  # Batch size for YOLO models
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 
-
+@lru_cache(maxsize=1)
 def _get_objects_defaults() -> dict:
-    """Get default values from ObjectsConfig to avoid circular imports."""
     try:
         from config import ObjectsConfig
         cfg = ObjectsConfig()
@@ -75,6 +72,9 @@ def _get_objects_defaults() -> dict:
             "detector_backend": cfg.detector_backend,
             "clip_model_name": cfg.clip_model_name,
             "cluster_base_eps": cfg.cluster_base_eps,
+            "face_cluster_base_eps": cfg.face_cluster_base_eps,
+            "cluster_dedup_threshold": cfg.cluster_dedup_threshold,
+            "cluster_noise_max_distance": cfg.cluster_noise_max_distance,
             "cluster_min_samples": cfg.cluster_min_samples,
             "cluster_min_attempts": cfg.cluster_min_attempts,
             "keyframe_eps": cfg.keyframe_eps,
@@ -83,11 +83,10 @@ def _get_objects_defaults() -> dict:
             "keyframe_require_both": cfg.keyframe_require_both,
         }
     except Exception:
-        # Fallback defaults if config import fails
         return {
-            "detection_model": "yolo11s.pt",
-            "segmentation_model": "yolo11s-seg.pt",
-            "pose_model": "yolo11s-pose.pt",
+            "detection_model": "yolo26x.pt",
+            "segmentation_model": "yolo26x-seg.pt",
+            "pose_model": "yolo26x-pose.pt",
             "object_conf_threshold": 0.80,
             "iou_match_threshold": 0.5,
             "keypoint_conf_threshold": 0.6,
@@ -98,6 +97,9 @@ def _get_objects_defaults() -> dict:
             "detector_backend": "retinaface",
             "clip_model_name": "ViT-B/32",
             "cluster_base_eps": 0.35,
+            "face_cluster_base_eps": 0.20,
+            "cluster_dedup_threshold": 0.95,
+            "cluster_noise_max_distance": 0.60,
             "cluster_min_samples": 1,
             "cluster_min_attempts": 4,
             "keyframe_eps": 0.12,
@@ -106,14 +108,8 @@ def _get_objects_defaults() -> dict:
             "keyframe_require_both": True,
         }
 
-
 @dataclass
 class _ObjectsSettings:
-    """Internal settings container for objects module.
-    
-    Defaults are sourced from ObjectsConfig in config.py.
-    """
-
     detection_model: str = field(default_factory=lambda: _get_objects_defaults()["detection_model"])
     segmentation_model: str = field(default_factory=lambda: _get_objects_defaults()["segmentation_model"])
     pose_model: str = field(default_factory=lambda: _get_objects_defaults()["pose_model"])
@@ -127,6 +123,9 @@ class _ObjectsSettings:
     detector_backend: str = field(default_factory=lambda: _get_objects_defaults()["detector_backend"])
     clip_model_name: str = field(default_factory=lambda: _get_objects_defaults()["clip_model_name"])
     cluster_base_eps: float = field(default_factory=lambda: _get_objects_defaults()["cluster_base_eps"])
+    face_cluster_base_eps: float = field(default_factory=lambda: _get_objects_defaults()["face_cluster_base_eps"])
+    cluster_dedup_threshold: float = field(default_factory=lambda: _get_objects_defaults()["cluster_dedup_threshold"])
+    cluster_noise_max_distance: float = field(default_factory=lambda: _get_objects_defaults()["cluster_noise_max_distance"])
     cluster_min_samples: int = field(default_factory=lambda: _get_objects_defaults()["cluster_min_samples"])
     cluster_min_attempts: int = field(default_factory=lambda: _get_objects_defaults()["cluster_min_attempts"])
     keyframe_eps: float = field(default_factory=lambda: _get_objects_defaults()["keyframe_eps"])
@@ -134,13 +133,94 @@ class _ObjectsSettings:
     keyframe_hamming_frac: float = field(default_factory=lambda: _get_objects_defaults()["keyframe_hamming_frac"])
     keyframe_require_both: bool = field(default_factory=lambda: _get_objects_defaults()["keyframe_require_both"])
 
+# =============================================================================
+# Async I/O Helpers
+# =============================================================================
+
+class ThreadedImageWriter:
+    """Non-blocking image writer to keep GPU fed."""
+    def __init__(self, max_workers=4):
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.futures = []
+        # Limit queue size to prevent memory explosion if disk is slow
+        self.max_queue = max_workers * 10
+        
+    def write(self, path: str, img: np.ndarray):
+        # Prune finished futures
+        self.futures = [f for f in self.futures if not f.done()]
+        
+        # Backpressure: Wait if queue is full
+        if len(self.futures) > self.max_queue:
+            _, self.futures = wait(self.futures, return_when="FIRST_COMPLETED")
+            
+        self.futures.append(self.executor.submit(cv2.imwrite, path, img))
+        
+    def shutdown(self):
+        wait(self.futures)
+        self.executor.shutdown(wait=True)
+
+class AsyncVideoReader:
+    """Reads frames in background thread with smart seeking."""
+    def __init__(self, path: str, indices: List[int], queue_size=32):
+        self.path = path
+        self.indices = sorted(list(set(indices)))
+        self.queue = queue.Queue(maxsize=queue_size)
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._worker, daemon=True)
+        self.total = len(self.indices)
+        
+    def start(self):
+        self.thread.start()
+        
+    def _worker(self):
+        cap = cv2.VideoCapture(self.path)
+        current_pos = -1
+        
+        for idx in self.indices:
+            if self.stop_event.is_set():
+                break
+            
+            # Smart Seek
+            gap = idx - current_pos - 1
+            if gap == 0:
+                pass
+            elif 0 < gap < SMART_SEEK_THRESHOLD:
+                for _ in range(gap): cap.grab()
+            else:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, float(idx))
+            
+            ret, frame = cap.read()
+            current_pos = idx
+            
+            if not ret:
+                break
+                
+            self.queue.put((idx, frame))
+            
+        cap.release()
+        self.queue.put(None)
+        
+    def __iter__(self):
+        return self
+        
+    def __next__(self):
+        item = self.queue.get()
+        if item is None:
+            raise StopIteration
+        return item
+        
+    def stop(self):
+        self.stop_event.set()
+        # Drain queue
+        while not self.queue.empty():
+            try: self.queue.get_nowait()
+            except: pass
 
 # =============================================================================
-# Cached Model Singletons (acceptable pattern - not mutated during execution)
+# Cached Models
 # =============================================================================
 
 _TF_MODULE: Optional[Any] = None
-
 _DEEPFACE_CLASS: Optional[Any] = None
 _CLIP_MODEL: Optional[Any] = None
 _CLIP_PREPROCESS: Optional[Any] = None
@@ -152,56 +232,34 @@ _YOLO_SEGMENTATION_MODEL: Optional[YOLO] = None
 _YOLO_POSE_MODEL: Optional[YOLO] = None
 _YOLO_USE_HALF_PRECISION: bool = False
 
-
 class _NumpyEncoder(json.JSONEncoder):
-    """Internal JSON encoder for numpy types."""
-
     def default(self, obj: Any):
-        if isinstance(obj, np.integer):
-            return int(obj)
-        if isinstance(obj, np.floating):
-            return float(obj)
-        if isinstance(obj, np.bool_):
-            return bool(obj)
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
+        if isinstance(obj, np.integer): return int(obj)
+        if isinstance(obj, np.floating): return float(obj)
+        if isinstance(obj, np.bool_): return bool(obj)
+        if isinstance(obj, np.ndarray): return obj.tolist()
         return super().default(obj)
-
-
-
-# ---------------------------------------------------------------------------
-# TensorFlow / DeepFace helpers
-# ---------------------------------------------------------------------------
 
 def _ensure_tensorflow(debug: bool) -> Optional[Any]:
     global _TF_MODULE
-    if _TF_MODULE is not None:
-        return _TF_MODULE
+    if _TF_MODULE is not None: return _TF_MODULE
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0" if debug else "3"
     try:
         with gray_debug_output(debug):
             tf_module = importlib.import_module("tensorflow")
-    except Exception:
-        return None
-    try:
-        tf_module.config.set_visible_devices([], "GPU")
-    except Exception:
-        pass
-    _TF_MODULE = tf_module
-    return _TF_MODULE
-
+        try: tf_module.config.set_visible_devices([], "GPU")
+        except: pass
+        _TF_MODULE = tf_module
+        return _TF_MODULE
+    except Exception: return None
 
 def _ensure_deepface(debug: bool) -> Optional[Any]:
     global _DEEPFACE_CLASS
-    if _DEEPFACE_CLASS is not None:
-        return _DEEPFACE_CLASS
+    if _DEEPFACE_CLASS is not None: return _DEEPFACE_CLASS
     with gray_debug_output(debug):
-        from deepface import DeepFace as _DeepFace  # type: ignore
-
+        from deepface import DeepFace as _DeepFace
     _DEEPFACE_CLASS = _DeepFace
     return _DEEPFACE_CLASS
-
-
 
 # ---------------------------------------------------------------------------
 # Utility helpers
@@ -213,146 +271,13 @@ def _strip_face_for_results(face: Dict[str, Any]) -> Dict[str, Any]:
     public_face.pop("embedding_model", None)
     return public_face
 
-
-def _iterate_selected_frames(
-    video_path: str,
-    indices: Sequence[int],
-    *,
-    debug: bool = False,
-) -> Iterator[Tuple[int, np.ndarray]]:
-    normalized: List[int] = []
-    for value in indices:
-        if value is None:
-            continue
-        try:
-            normalized.append(int(value))
-        except (TypeError, ValueError):
-            continue
-
-    ordered = sorted(set(normalized))
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open video file: {video_path}")
-
-    max_index: Optional[int] = None
-    try:
-        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-    except Exception:
-        frame_count = 0.0
-
-    if isinstance(frame_count, (int, float)) and frame_count > 0:
-        try:
-            max_index = int(frame_count) - 1
-        except Exception:
-            max_index = None
-
-    if max_index is not None:
-        in_range: List[int] = []
-        clipped: List[int] = []
-        for idx in ordered:
-            if 0 <= idx <= max_index:
-                in_range.append(idx)
-            else:
-                clipped.append(idx)
-        if clipped:
-            sample = ", ".join(str(item) for item in clipped[:5])
-            debug_print(
-                (
-                    "INFO: Skipping %d frame(s) outside valid range [0, %d] for '%s'"
-                    " (examples: %s)"
-                )
-                % (len(clipped), max_index, os.path.basename(video_path), sample),
-                debug=debug,
-            )
-        ordered = in_range
-    else:
-        ordered = [idx for idx in ordered if idx >= 0]
-
-    if ordered:
-        probe_cap = cv2.VideoCapture(video_path)
-        if probe_cap.isOpened():
-            probe_index = ordered[-1]
-            attempts = 0
-            real_max: Optional[int] = None
-            while probe_index >= 0 and attempts < 512:
-                seek_ok = probe_cap.set(cv2.CAP_PROP_POS_FRAMES, probe_index)
-                ret = False
-                if seek_ok:
-                    ret, _ = probe_cap.read()
-                if ret:
-                    real_max = probe_index
-                    break
-                probe_index -= 1
-                attempts += 1
-            probe_cap.release()
-
-            if real_max is not None and real_max < ordered[-1]:
-                trimmed = [idx for idx in ordered if idx > real_max]
-                if trimmed:
-                    sample = ", ".join(str(item) for item in trimmed[:5])
-                    debug_print(
-                        (
-                            "INFO: Dropping %d frame(s) beyond decode range (max=%d) for '%s'"
-                            " (examples: %s)"
-                        )
-                        % (len(trimmed), real_max, os.path.basename(video_path), sample),
-                        debug=debug,
-                    )
-                ordered = [idx for idx in ordered if idx <= real_max]
-
-    if not ordered:
-        cap.release()
-        return
-
-    try:
-        target_iter = iter(ordered)
-        try:
-            next_index = next(target_iter)
-        except StopIteration:
-
-            return
-        frame_idx = 0
-        processed = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                remaining = len(ordered) - processed
-                if remaining > 0 and debug:
-                    missing_preview = ", ".join(
-                        str(item) for item in ordered[processed : processed + 3]
-                    )
-                    debug_print(
-                        (
-                            "INFO: Decoder hit end-of-stream after %d frame(s); skipping %d "
-                            "pending index(es) (next: %s)."
-                        )
-                        % (processed, remaining, missing_preview),
-                        debug=debug,
-                    )
-                break
-            if frame_idx == next_index:
-                yield next_index, frame
-                processed += 1
-
-                try:
-                    next_index = next(target_iter)
-                except StopIteration:
-                    break
-            frame_idx += 1
-    finally:
-        cap.release()
-
-
 def _probe_video_fps(video_path: str) -> float:
     cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return 0.0
+    if not cap.isOpened(): return 0.0
     try:
         fps = cap.get(cv2.CAP_PROP_FPS)
         return float(fps) if fps and fps > 0 else 0.0
-    finally:
-        cap.release()
-
+    finally: cap.release()
 
 def _prepare_class_dir(cache: Dict[str, str], base_dir: str, class_name: str) -> str:
     if class_name not in cache:
@@ -362,104 +287,78 @@ def _prepare_class_dir(cache: Dict[str, str], base_dir: str, class_name: str) ->
         cache[class_name] = class_path
     return cache[class_name]
 
-
 def _list_valid_images(folder: str) -> List[str]:
-    if not os.path.isdir(folder):
-        return []
-    valid: List[str] = []
+    if not os.path.isdir(folder): return []
+    valid = []
     for name in os.listdir(folder):
         lower = name.lower()
-        if not lower.endswith(VALID_IMAGE_EXTENSIONS):
-            continue
-        if lower.startswith("_") or any(marker in lower for marker in EXCLUDED_CLUSTER_MARKERS):
-            continue
+        if not lower.endswith(VALID_IMAGE_EXTENSIONS): continue
+        if lower.startswith("_") or any(marker in lower for marker in EXCLUDED_CLUSTER_MARKERS): continue
         abs_path = os.path.join(folder, name)
-        if os.path.isfile(abs_path):
-            valid.append(abs_path)
+        if os.path.isfile(abs_path): valid.append(abs_path)
     return sorted(valid)
 
-
-def _ensure_clip_resources(
-    debug: bool,
-    clip_model_name: str,
-) -> Tuple[Optional[Any], Optional[Any], Optional[torch.device]]:
+def _ensure_clip_resources(debug: bool, clip_model_name: str):
     global _CLIP_MODEL, _CLIP_PREPROCESS, _CLIP_DEVICE
-    if _CLIP_MODEL is not None and _CLIP_PREPROCESS is not None and _CLIP_DEVICE is not None:
+    if _CLIP_MODEL and _CLIP_PREPROCESS and _CLIP_DEVICE:
         return _CLIP_MODEL, _CLIP_PREPROCESS, _CLIP_DEVICE
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     try:
         with gray_debug_output(debug):
             model, preprocess = clip.load(clip_model_name, device=device)
         model.eval()
     except Exception as exc:
-        print(f"ERROR: Unable to load CLIP model '{clip_model_name}': {exc}")
+        print(f"ERROR: CLIP load failed: {exc}")
         return None, None, None
-
-    _CLIP_MODEL = model
-    _CLIP_PREPROCESS = preprocess
-    _CLIP_DEVICE = device
+    _CLIP_MODEL, _CLIP_PREPROCESS, _CLIP_DEVICE = model, preprocess, device
     return model, preprocess, device
-
 
 def _extract_clip_features(
     image_paths: Sequence[str],
     *,
     debug: bool,
     clip_model_name: str,
-    batch_size: int = 32,
+    batch_size: int = 64,
 ) -> Dict[str, np.ndarray]:
-    """Extract CLIP features from images with batch processing for performance.
-    
-    Args:
-        image_paths: Sequence of image file paths.
-        debug: Enable debug output.
-        clip_model_name: CLIP model variant to use.
-        batch_size: Number of images to process in each batch (default 32).
-        
-    Returns:
-        Dictionary mapping image path to feature vector.
-    """
+    """Extract CLIP features using ThreadPool for preprocessing to maximize GPU."""
     model, preprocess, device = _ensure_clip_resources(debug, clip_model_name)
-    if model is None or preprocess is None or device is None:
-        return {}
+    if not model: return {}
 
-    feature_map: Dict[str, np.ndarray] = {}
+    feature_map = {}
     
-    # Process images in batches for better GPU utilization
-    valid_paths: List[str] = []
-    valid_tensors: List[torch.Tensor] = []
-    
-    for path in image_paths:
+    # Preprocessing function for ThreadPool
+    def _process_img(p):
         try:
-            with Image.open(path) as img:
-                tensor = preprocess(img.convert("RGB"))
-            valid_paths.append(path)
-            valid_tensors.append(tensor)
-        except FileNotFoundError:
-            debug_print(f"WARNING: Image for clustering not found: {path}", debug=debug)
-        except Exception as exc:
-            debug_print(f"WARNING: Failed to process image '{path}' for clustering: {exc}", debug=debug)
-    
-    if not valid_tensors:
-        return feature_map
-    
-    # Process in batches
-    for i in range(0, len(valid_tensors), batch_size):
-        batch_paths = valid_paths[i:i + batch_size]
-        batch_tensors = torch.stack(valid_tensors[i:i + batch_size]).to(device)
-        
-        with torch.no_grad():
-            batch_features = model.encode_image(batch_tensors)
-        
-        batch_features_np = batch_features.detach().cpu().numpy().astype(np.float32, copy=True)
-        
-        for idx, path in enumerate(batch_paths):
-            feature_map[path] = batch_features_np[idx]
+            with Image.open(p) as img:
+                return p, preprocess(img.convert("RGB"))
+        except: return p, None
+
+    # Load and preprocess in parallel while GPU is busy
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for i in range(0, len(image_paths), batch_size):
+            batch_files = image_paths[i:i+batch_size]
+            results = list(pool.map(_process_img, batch_files))
+            
+            valid_tensors = []
+            valid_paths = []
+            for path, tensor in results:
+                if tensor is not None:
+                    valid_paths.append(path)
+                    valid_tensors.append(tensor)
+            
+            if not valid_tensors: continue
+            
+            inp = torch.stack(valid_tensors).to(device)
+            with torch.no_grad():
+                features = model.encode_image(inp)
+                
+            features_np = features.detach().cpu().numpy().astype(np.float32)
+            for idx, p in enumerate(valid_paths):
+                feature_map[p] = features_np[idx]
 
     return feature_map
 
-
+# Helpers for pHash
 def _dct_matrix(n: int) -> np.ndarray:
     k = np.arange(n)[:, None]
     n_ = np.arange(n)[None, :]
@@ -468,13 +367,12 @@ def _dct_matrix(n: int) -> np.ndarray:
     mat[1:, :] = mat[1:, :] * np.sqrt(2 / n)
     return mat.astype(np.float32)
 
-
 def _dct_2d(a: np.ndarray) -> np.ndarray:
     n, m = a.shape
     return _dct_matrix(n) @ a @ _dct_matrix(m).T
 
-
-def _phash64(path: str) -> int:
+def _phash64_pil(path: str) -> int:
+    """Standard PIL pHash to ensure exact precision/results match with original."""
     try:
         with Image.open(path) as img:
             img_l = img.convert("L")
@@ -497,7 +395,6 @@ def _phash64(path: str) -> int:
     except Exception:
         return 0
 
-
 def _copy_with_unique_name(src: str, dst_dir: str) -> str:
     os.makedirs(dst_dir, exist_ok=True)
     base = os.path.basename(src)
@@ -510,31 +407,16 @@ def _copy_with_unique_name(src: str, dst_dir: str) -> str:
     shutil.copy2(src, candidate)
     return os.path.abspath(candidate)
 
-
-def _cleanup_annotation_outputs(base_dir: str) -> None:
-    if not os.path.isdir(base_dir):
-        return
-
+def _cleanup_annotation_outputs(base_dir: str):
+    if not os.path.isdir(base_dir): return
     for entry in list(os.listdir(base_dir)):
-        if entry == "clusters":
-            continue
+        if entry == "clusters": continue
         path = os.path.join(base_dir, entry)
-        if os.path.isdir(path):
-            shutil.rmtree(path, ignore_errors=True)
+        if os.path.isdir(path): shutil.rmtree(path, ignore_errors=True)
         else:
-            try:
-                os.remove(path)
-            except Exception:
-                pass
-
-    try:
-        remaining = os.listdir(base_dir)
-    except OSError:
-        return
-
-    if not remaining:
-        shutil.rmtree(base_dir, ignore_errors=True)
-
+            try: os.remove(path)
+            except: pass
+    if not os.listdir(base_dir): shutil.rmtree(base_dir, ignore_errors=True)
 
 def _select_keyframes(
     source_paths: Sequence[str],
@@ -546,171 +428,109 @@ def _select_keyframes(
     require_both: bool,
     debug: bool,
 ) -> List[str]:
-    if not source_paths:
-        return []
-
-    feats = [feature_map.get(path) for path in source_paths]
-    feats = [f for f in feats if f is not None]
-    if not feats:
-        return []
-
+    if not source_paths: return []
+    feats = [feature_map.get(p) for p in source_paths]
+    valid_idxs = [i for i, f in enumerate(feats) if f is not None]
+    if not valid_idxs: return []
+    
+    feats = [feats[i] for i in valid_idxs]
+    source_paths_valid = [source_paths[i] for i in valid_idxs]
+    
     feature_matrix = l2_normalize_rows(np.stack(feats, axis=0))
     try:
-        sub_dbscan = DBSCAN(
-            eps=float(eps),
-            min_samples=int(min_samples),
-            metric="cosine",
-            n_jobs=-1,
-        )
-        labels = sub_dbscan.fit_predict(feature_matrix)
-    except Exception as exc:
-        debug_print(f"WARNING: Secondary clustering for keyframes failed: {exc}", debug=debug)
-        labels = np.zeros((len(source_paths),), dtype=int)
-
-    labels = labels.copy()
-    unique_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
-    label_map = {old: new for new, old in enumerate(unique_labels)}
-    for idx, lbl in enumerate(labels):
-        if lbl >= 0:
-            labels[idx] = label_map[int(lbl)]
-
-    # Compute pHash values in parallel for better performance on large image sets
-    with ThreadPoolExecutor(max_workers=min(8, len(source_paths))) as executor:
-        phashes = list(executor.map(_phash64, source_paths))
+        labels = DBSCAN(eps=float(eps), min_samples=int(min_samples), metric="cosine", n_jobs=-1).fit_predict(feature_matrix)
+    except:
+        labels = np.zeros(len(feats), dtype=int)
+        
+    # Parallel pHash using PIL logic to preserve precision
+    with ThreadPoolExecutor(max_workers=min(8, len(source_paths_valid))) as ex:
+        phashes = list(ex.map(_phash64_pil, source_paths_valid))
+        
+    selected = []
+    unique_labels = sorted(set(labels))
+    if -1 in unique_labels: unique_labels.remove(-1)
     
-    selected_indices: List[int] = []
-    considered_clusters = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
-
-    for cluster_idx in considered_clusters:
-        member_indices = [i for i, lbl in enumerate(labels) if int(lbl) == cluster_idx]
-        chosen: List[int] = []
-        for member in member_indices:
+    for lbl in unique_labels:
+        indices = [i for i, x in enumerate(labels) if x == lbl]
+        chosen = []
+        for member in indices:
             if not chosen:
-                chosen.append(member)
-                continue
-            cos_distances: List[float] = []
-            hamm_distances: List[float] = []
-            feat_member = feature_matrix[member] / (np.linalg.norm(feature_matrix[member]) + 1e-8)
-            for existing in chosen:
-                feat_existing = feature_matrix[existing] / (np.linalg.norm(feature_matrix[existing]) + 1e-8)
-                cos_distances.append(1.0 - float(np.dot(feat_member, feat_existing)))
-                xor_val = (phashes[member] ^ phashes[existing]) & ((1 << 64) - 1)
-                hamm_distances.append(xor_val.bit_count() / 64.0)
-            min_cos = min(cos_distances) if cos_distances else 1.0
-            min_hamm = min(hamm_distances) if hamm_distances else 1.0
-            different = (min_cos >= eps) or (min_hamm >= hamming_frac)
-            if require_both:
-                different = (min_cos >= eps) and (min_hamm >= hamming_frac)
-            if different:
-                chosen.append(member)
-        selected_indices.extend(chosen)
-
-    if not selected_indices:
-        selected_indices = [0]
-
-    unique_selected = sorted(set(selected_indices))
-    return [source_paths[idx] for idx in unique_selected if idx < len(source_paths)]
-
+                chosen.append(member); continue
+            
+            f_mem = feature_matrix[member]
+            h_mem = phashes[member]
+            
+            cos_dists = []
+            hamm_dists = []
+            
+            for ex in chosen:
+                f_ex = feature_matrix[ex]
+                cos_dists.append(1.0 - float(np.dot(f_mem, f_ex)))
+                xor = (h_mem ^ phashes[ex]) & ((1 << 64) - 1)
+                hamm_dists.append(bin(xor).count('1') / 64.0)
+                
+            min_cos = min(cos_dists) if cos_dists else 1.0
+            min_hamm = min(hamm_dists) if hamm_dists else 1.0
+            
+            diff = (min_cos >= eps) and (min_hamm >= hamming_frac) if require_both else (min_cos >= eps) or (min_hamm >= hamming_frac)
+            if diff: chosen.append(member)
+        selected.extend([source_paths_valid[i] for i in chosen])
+        
+    if not selected: selected = [source_paths_valid[0]]
+    return list(sorted(set(selected)))
 
 def _determine_half_precision(device: torch.device) -> bool:
-    if device.type != "cuda":
-        return False
+    if device.type != "cuda": return False
     try:
-        major, _minor = torch.cuda.get_device_capability(device)
-    except Exception:
-        return False
-    return major >= 6
-
+        major, _ = torch.cuda.get_device_capability(device)
+        return major >= 6
+    except: return False
 
 def _prepare_yolo_model(model: YOLO, device: torch.device, *, use_half: bool, debug: bool) -> YOLO:
-    try:
-        model.to(device)
-    except Exception:
-        pass
-    try:
-        model.fuse()
-    except Exception:
-        pass
-
+    try: model.to(device)
+    except: pass
+    try: model.fuse()
+    except: pass
     if use_half:
-        try:
-            model.model.half()  # type: ignore[attr-defined]
-        except Exception:
-            debug_print("WARNING: Failed to enable half precision for YOLO model; using float32 instead.", debug=debug)
+        try: model.model.half()
+        except:
             use_half = False
-            try:
-                model.model.float()  # type: ignore[attr-defined]
-            except Exception:
-                pass
+            try: model.model.float()
+            except: pass
     return model
 
-
-def _ensure_yolo_models(
-    *,
-    debug: bool,
-    require_segmentation: bool,
-    require_pose: bool,
-    detection_model_name: str = "yolo11s.pt",
-    segmentation_model_name: str = "yolo11s-seg.pt",
-    pose_model_name: str = "yolo11s-pose.pt",
-) -> Tuple[YOLO, Optional[YOLO], Optional[YOLO], torch.device]:
+def _ensure_yolo_models(debug: bool, require_segmentation: bool, require_pose: bool, detection_model_name: str, segmentation_model_name: str, pose_model_name: str):
     global _YOLO_OBJECT_MODEL, _YOLO_SEGMENTATION_MODEL, _YOLO_POSE_MODEL, _YOLO_DEVICE, _YOLO_USE_HALF_PRECISION
-
     if _YOLO_DEVICE is None:
         _YOLO_DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         _YOLO_USE_HALF_PRECISION = _determine_half_precision(_YOLO_DEVICE)
-
     device = _YOLO_DEVICE
+    
+    def _load_model(name):
+        # Strict adherence to /platform requirement
+        cwd = os.getcwd()
+        try:
+            if os.path.isdir("/platform"):
+                os.chdir("/platform")
+            with gray_debug_output(debug):
+                m = YOLO(name)
+            return m
+        finally:
+            os.chdir(cwd)
 
     if _YOLO_OBJECT_MODEL is None:
-        with gray_debug_output(debug):
-            old_cwd = os.getcwd()
-            try:
-                os.chdir("/platform")
-                object_model = YOLO(detection_model_name)
-            finally:
-                os.chdir(old_cwd)
-        _YOLO_OBJECT_MODEL = _prepare_yolo_model(object_model, device, use_half=_YOLO_USE_HALF_PRECISION, debug=debug)
-        try:
-            _YOLO_OBJECT_MODEL.model.eval()  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
+        _YOLO_OBJECT_MODEL = _load_model(detection_model_name)
+        _YOLO_OBJECT_MODEL = _prepare_yolo_model(_YOLO_OBJECT_MODEL, device, use_half=_YOLO_USE_HALF_PRECISION, debug=debug)
+        
     if require_segmentation and _YOLO_SEGMENTATION_MODEL is None:
-        with gray_debug_output(debug):
-            old_cwd = os.getcwd()
-            try:
-                os.chdir("/platform")
-                segmentation_model = YOLO(segmentation_model_name)
-            finally:
-                os.chdir(old_cwd)
-        _YOLO_SEGMENTATION_MODEL = _prepare_yolo_model(segmentation_model, device, use_half=_YOLO_USE_HALF_PRECISION, debug=debug)
-        try:
-            _YOLO_SEGMENTATION_MODEL.model.eval()  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
+        _YOLO_SEGMENTATION_MODEL = _load_model(segmentation_model_name)
+        _YOLO_SEGMENTATION_MODEL = _prepare_yolo_model(_YOLO_SEGMENTATION_MODEL, device, use_half=_YOLO_USE_HALF_PRECISION, debug=debug)
+        
     if require_pose and _YOLO_POSE_MODEL is None:
-        with gray_debug_output(debug):
-            old_cwd = os.getcwd()
-            try:
-                os.chdir("/platform")
-                pose_model = YOLO(pose_model_name)
-            finally:
-                os.chdir(old_cwd)
-        _YOLO_POSE_MODEL = _prepare_yolo_model(pose_model, device, use_half=_YOLO_USE_HALF_PRECISION, debug=debug)
-        try:
-            _YOLO_POSE_MODEL.model.eval()  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
-    return (
-        _YOLO_OBJECT_MODEL,
-        _YOLO_SEGMENTATION_MODEL if require_segmentation else None,
-        _YOLO_POSE_MODEL if require_pose else None,
-        device,
-    )
-
+        _YOLO_POSE_MODEL = _load_model(pose_model_name)
+        _YOLO_POSE_MODEL = _prepare_yolo_model(_YOLO_POSE_MODEL, device, use_half=_YOLO_USE_HALF_PRECISION, debug=debug)
+        
+    return _YOLO_OBJECT_MODEL, (_YOLO_SEGMENTATION_MODEL if require_segmentation else None), (_YOLO_POSE_MODEL if require_pose else None), device
 
 def _cluster_class_directory(
     class_name: str,
@@ -719,6 +539,8 @@ def _cluster_class_directory(
     debug: bool,
     base_eps: float,
     min_samples: int,
+    dedup_threshold: float,
+    noise_max_distance: float,
     key_eps: float,
     key_min_samples: int,
     key_hamming_frac: float,
@@ -726,116 +548,207 @@ def _cluster_class_directory(
     cluster_min_attempts: int,
     clip_model_name: str,
 ) -> Optional[Dict[str, Any]]:
+    """Cluster cropped object images using a two-passage approach.
+
+    Passage 1 — Near-duplicate pre-filter:
+        Sequential scan keeps only crops whose cosine similarity to the
+        previously kept crop is below ``dedup_threshold``.
+
+    Passage 2 — Adaptive DBSCAN on candidates:
+        Runs the adaptive eps retry loop on the deduplicated candidate set.
+
+    Passage 3 — Centroid assignment:
+        Computes cluster centroids from candidates and assigns *every*
+        original crop to the nearest centroid.  Crops whose cosine distance
+        exceeds ``noise_max_distance`` are relegated to the noise folder.
+    """
     images = _list_valid_images(image_folder)
     if not images:
-        print(f"INFO: Skipping clustering for '{class_name}' (no valid images).")
         return None
 
-    feature_map = _extract_clip_features(images, debug=debug, clip_model_name=clip_model_name)
-    ordered_paths = [path for path in images if path in feature_map]
-    if len(ordered_paths) < min_samples:
-        print(
-            f"WARNING: Not enough valid images with features for '{class_name}' clustering (found {len(ordered_paths)})."
+    # Use segmentation-masked crops (background removed) for feature
+    # extraction when available.  This forces CLIP to focus on the subject
+    # rather than the shared background, dramatically improving accuracy
+    # for small datasets.  Cluster folders still use the original crops.
+    seg_dir = os.path.join(image_folder, "_seg")
+    if os.path.isdir(seg_dir):
+        feature_source_paths: List[str] = []
+        for img_path in images:
+            seg_path = os.path.join(seg_dir, os.path.basename(img_path))
+            feature_source_paths.append(seg_path if os.path.isfile(seg_path) else img_path)
+        raw_feature_map = _extract_clip_features(
+            feature_source_paths, debug=debug, clip_model_name=clip_model_name,
         )
+        # Remap keys: seg path -> original path so downstream uses originals
+        feature_map: Dict[str, np.ndarray] = {}
+        for img_path, src_path in zip(images, feature_source_paths):
+            if src_path in raw_feature_map:
+                feature_map[img_path] = raw_feature_map[src_path]
+    else:
+        feature_map = _extract_clip_features(
+            images, debug=debug, clip_model_name=clip_model_name,
+        )
+
+    ordered_paths = [p for p in images if p in feature_map]
+    if len(ordered_paths) < min_samples:
         return None
 
-    feature_matrix = l2_normalize_rows(np.stack([feature_map[path] for path in ordered_paths], axis=0))
+    feature_matrix = l2_normalize_rows(
+        np.stack([feature_map[p] for p in ordered_paths], axis=0)
+    )
 
-    attempt_eps = float(base_eps)
-    labels: Optional[np.ndarray] = None
+    if debug:
+        sim_mtx = feature_matrix @ feature_matrix.T
+        names_short = [os.path.basename(p)[:15] for p in ordered_paths]
+        debug_print(f"[cluster:{class_name}] {len(ordered_paths)} images, pairwise cosine similarity:", debug=debug)
+        for i, n in enumerate(names_short):
+            row = " ".join(f"{sim_mtx[i, j]:.3f}" for j in range(len(names_short)))
+            debug_print(f"  {n:>15s} | {row}", debug=debug)
+        off = sim_mtx[np.triu_indices(len(names_short), k=1)]
+        debug_print(f"  off-diag: min={off.min():.4f} max={off.max():.4f} mean={off.mean():.4f} std={off.std():.4f}", debug=debug)
+        used_seg = os.path.isdir(os.path.join(image_folder, "_seg"))
+        debug_print(f"  feature_source={'_seg/ (masked)' if used_seg else 'original crops'}", debug=debug)
+
+    # ------------------------------------------------------------------
+    # Passage 1 — Near-duplicate pre-filter (linear scan)
+    # ------------------------------------------------------------------
+    cand_indices: List[int] = []
+    last_feat: Optional[np.ndarray] = None
+    for j, feat in enumerate(feature_matrix):
+        if last_feat is None:
+            cand_indices.append(j)
+            last_feat = feat
+        else:
+            sim = float(np.dot(last_feat, feat))
+            if sim < float(dedup_threshold):
+                cand_indices.append(j)
+                last_feat = feat
+
+    cand_matrix = feature_matrix[cand_indices]
+
+    # ------------------------------------------------------------------
+    # Passage 2 — Adaptive DBSCAN on candidate subset
+    # ------------------------------------------------------------------
     effective_eps = float(base_eps)
-    for attempt in range(cluster_min_attempts):
-        eps_candidate = estimate_dbscan_eps(feature_matrix, attempt_eps, min_samples)
-        if not np.isfinite(eps_candidate) or eps_candidate <= 0:
-            eps_candidate = attempt_eps
-        eps_candidate = max(0.05, min(float(eps_candidate), 0.95))
-        try:
-            dbscan = DBSCAN(
-                eps=eps_candidate,
-                min_samples=int(min_samples),
-                metric="cosine",
-                n_jobs=-1,
-            )
-            candidate_labels = dbscan.fit_predict(feature_matrix)
-        except Exception as exc:
-            debug_print(f"WARNING: Primary clustering failed on attempt {attempt + 1}: {exc}", debug=debug)
-            candidate_labels = np.full((feature_matrix.shape[0],), -1, dtype=int)
+    cand_labels: Optional[np.ndarray] = None
 
-        candidate_labels = candidate_labels.copy()
-        unique_positive = sorted(set(int(lbl) for lbl in candidate_labels if lbl >= 0))
-        mapping = {old: new for new, old in enumerate(unique_positive)}
-        for idx, lbl in enumerate(candidate_labels):
-            if lbl >= 0:
-                candidate_labels[idx] = mapping[int(lbl)]
+    if len(cand_indices) < 2:
+        # Too few candidates — everything goes into a single cluster
+        cand_labels = np.zeros(len(cand_indices), dtype=int)
+    else:
+        attempt_eps = float(base_eps)
+        for attempt in range(cluster_min_attempts):
+            eps_candidate = estimate_dbscan_eps(cand_matrix, attempt_eps, min_samples)
+            if not np.isfinite(eps_candidate) or eps_candidate <= 0:
+                eps_candidate = attempt_eps
+            eps_candidate = max(0.05, min(float(eps_candidate), 0.95))
 
-        cluster_count = len(unique_positive)
-        if cluster_count > 1 or attempt == cluster_min_attempts - 1:
-            labels = candidate_labels
-            effective_eps = eps_candidate
-            if cluster_count <= 1:
+            try:
+                trial_labels = DBSCAN(
+                    eps=eps_candidate,
+                    min_samples=int(min_samples),
+                    metric="cosine",
+                    n_jobs=-1,
+                ).fit_predict(cand_matrix)
+            except Exception:
+                trial_labels = np.full(cand_matrix.shape[0], -1, dtype=int)
+
+            u_lbl = sorted(set(int(l) for l in trial_labels if l >= 0))
+            mapping = {o: n for n, o in enumerate(u_lbl)}
+            trial_labels = np.array([mapping.get(int(l), -1) for l in trial_labels])
+
+            if debug:
+                noise_cnt = int(np.sum(trial_labels == -1))
                 debug_print(
-                    f"INFO: '{class_name}' clustering yielded a single cluster even after tuning (attempt eps={eps_candidate:.3f}).",
+                    f"[cluster:{class_name}] attempt {attempt}: "
+                    f"eps={eps_candidate:.4f} -> {len(u_lbl)} cluster(s), "
+                    f"{noise_cnt} noise",
                     debug=debug,
                 )
-            break
-        attempt_eps *= 0.85
 
-    if labels is None:
-        print(f"WARNING: Clustering failed for '{class_name}'.")
+            if len(u_lbl) > 1 or attempt == cluster_min_attempts - 1:
+                cand_labels = trial_labels
+                effective_eps = eps_candidate
+                break
+            attempt_eps *= 0.85
+
+    if cand_labels is None:
         return None
 
+    # ------------------------------------------------------------------
+    # Passage 3 — Centroid computation & full assignment
+    # ------------------------------------------------------------------
+    unique_cand_labels = sorted(set(int(l) for l in cand_labels if l >= 0))
+    if not unique_cand_labels:
+        # All candidates are noise — fall back to a single cluster
+        unique_cand_labels = [0]
+        cand_labels = np.zeros(len(cand_indices), dtype=int)
+
+    num_clusters = len(unique_cand_labels)
+    centroids = np.zeros((num_clusters, cand_matrix.shape[1]), dtype=np.float32)
+    for new_id, cid in enumerate(unique_cand_labels):
+        members = cand_matrix[cand_labels == cid]
+        centroids[new_id] = members.mean(axis=0)
+    # Re-normalize centroids
+    centroids /= np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-8
+
+    # Assign every crop to nearest centroid via dot-product similarity
+    similarities = np.dot(feature_matrix, centroids.T)  # (N, K)
+    labels = np.argmax(similarities, axis=1)
+    max_sims = similarities[np.arange(len(labels)), labels]
+
+    # Mark as noise if too far from any centroid
+    noise_mask = max_sims < (1.0 - float(noise_max_distance))
+    labels[noise_mask] = -1
+
+    # Reindex labels contiguously (0, 1, 2, …)
+    final_unique = sorted(set(int(l) for l in labels if l >= 0))
+    final_mapping = {old: new for new, old in enumerate(final_unique)}
+    labels = np.array([final_mapping.get(int(l), -1) for l in labels])
+
+    # ------------------------------------------------------------------
+    # Build output folders and summary
+    # ------------------------------------------------------------------
     clusters_root = os.path.join(image_folder, "clusters")
     if os.path.isdir(clusters_root):
-        shutil.rmtree(clusters_root, ignore_errors=True)
+        shutil.rmtree(clusters_root)
     os.makedirs(clusters_root, exist_ok=True)
 
     cluster_details: List[Dict[str, Any]] = []
     noise_paths: List[str] = []
+    unique_labels = sorted(set(int(l) for l in labels if l >= 0))
 
-    unique_labels = sorted(set(int(lbl) for lbl in labels if lbl >= 0))
-    for cluster_idx in unique_labels:
-        cluster_dir = os.path.join(clusters_root, f"cluster_{cluster_idx:03d}")
-        os.makedirs(cluster_dir, exist_ok=True)
-        member_sources = [path for path, lbl in zip(ordered_paths, labels) if int(lbl) == cluster_idx]
-        copied_paths: List[str] = []
-        for src in member_sources:
-            copied_paths.append(_copy_with_unique_name(src, cluster_dir))
+    for c_idx in unique_labels:
+        c_dir = os.path.join(clusters_root, f"cluster_{c_idx:03d}")
+        members = [p for p, l in zip(ordered_paths, labels) if l == c_idx]
+        copied = [_copy_with_unique_name(src, c_dir) for src in members]
 
-        keyframe_sources = _select_keyframes(
-            member_sources,
-            feature_map,
-            eps=key_eps,
-            min_samples=key_min_samples,
-            hamming_frac=key_hamming_frac,
-            require_both=key_require_both,
+        keyframes = _select_keyframes(
+            members, feature_map,
+            eps=key_eps, min_samples=key_min_samples,
+            hamming_frac=key_hamming_frac, require_both=key_require_both,
             debug=debug,
         )
+        kf_paths: List[str] = []
+        if keyframes:
+            kf_dir = os.path.join(c_dir, "keyframes")
+            kf_paths = [_copy_with_unique_name(src, kf_dir) for src in keyframes]
 
-        keyframe_paths: List[str] = []
-        if keyframe_sources:
-            keyframe_dir = os.path.join(cluster_dir, "keyframes")
-            for src in keyframe_sources:
-                keyframe_paths.append(_copy_with_unique_name(src, keyframe_dir))
+        cluster_details.append({
+            "cluster_id": int(c_idx),
+            "cluster_folder": os.path.abspath(c_dir),
+            "image_paths": copied,
+            "image_count": len(copied),
+            "keyframes": kf_paths,
+            "keyframe_count": len(kf_paths),
+            "effective_eps": effective_eps,
+        })
 
-        cluster_details.append(
-            {
-                "cluster_id": int(cluster_idx),
-                "cluster_folder": os.path.abspath(cluster_dir),
-                "image_paths": copied_paths,
-                "image_count": len(copied_paths),
-                "keyframes": keyframe_paths,
-                "keyframe_count": len(keyframe_paths),
-                "effective_eps": effective_eps,
-            }
-        )
-
-    noise_dir = None
-    if any(lbl < 0 for lbl in labels):
-        noise_dir = os.path.join(clusters_root, "noise")
-        os.makedirs(noise_dir, exist_ok=True)
+    n_dir = os.path.join(clusters_root, "noise")
+    if any(l < 0 for l in labels):
         for src, lbl in zip(ordered_paths, labels):
-            if int(lbl) == -1:
-                noise_paths.append(_copy_with_unique_name(src, noise_dir))
+            if lbl == -1:
+                noise_paths.append(_copy_with_unique_name(src, n_dir))
 
     summary = {
         "class_name": class_name,
@@ -844,246 +757,108 @@ def _cluster_class_directory(
         "cluster_count": len(cluster_details),
         "noise_count": len(noise_paths),
         "total_images": len(ordered_paths),
+        "candidates_after_dedup": len(cand_indices),
         "clusters": cluster_details,
         "noise": {
-            "folder": os.path.abspath(noise_dir) if noise_dir else None,
+            "folder": os.path.abspath(n_dir) if noise_paths else None,
             "image_paths": noise_paths,
             "count": len(noise_paths),
         },
     }
 
-    report_path = os.path.join(clusters_root, "clusters.json")
-    try:
-        with open(report_path, "w", encoding="utf-8") as handle:
-            json.dump(summary, handle, indent=4)
-        summary["clusters_json"] = os.path.abspath(report_path)
-    except Exception as exc:
-        print(f"WARNING: Failed to write cluster summary for '{class_name}': {exc}")
-
+    with open(os.path.join(clusters_root, "clusters.json"), "w") as f:
+        json.dump(summary, f, indent=4)
     return summary
 
-
-def _match_segmentation(
-    bbox: np.ndarray,
-    seg_detections: Optional[sv.Detections],
-    *,
-    iou_match_threshold: float,
-) -> Optional[Tuple[int, np.ndarray]]:
-    if (
-        seg_detections is None
-        or seg_detections.xyxy is None
-        or len(seg_detections) == 0
-    ):
-        return None
+def _match_segmentation(bbox, seg_detections, *, iou_match_threshold):
+    if not seg_detections or not hasattr(seg_detections, 'xyxy') or len(seg_detections) == 0: return None
     seg_boxes = np.asarray(seg_detections.xyxy, dtype=np.float32)
-    if seg_boxes.size == 0:
-        return None
+    if seg_boxes.size == 0: return None
     ious = sv.box_iou_batch(np.asarray([bbox], dtype=np.float32), seg_boxes)
-    if ious.size == 0:
-        return None
+    if ious.size == 0: return None
     best_idx = int(np.argmax(ious[0]))
-    best_iou = float(ious[0, best_idx])
-    if best_iou < iou_match_threshold:
-        return None
-    if seg_detections.mask is None or len(seg_detections.mask) <= best_idx:
-        return None
+    if float(ious[0, best_idx]) < iou_match_threshold: return None
+    if seg_detections.mask is None or len(seg_detections.mask) <= best_idx: return None
     return best_idx, seg_detections.mask[best_idx]
 
-
-def _save_segmentation_artifacts(
-    frame_img: np.ndarray,
-    seg_detections: sv.Detections,
-    seg_index: int,
-    mask: np.ndarray,
-    class_dir: str,
-    frame_number: int,
-    file_stem: str,
-    mask_annotator: sv.MaskAnnotator,
-    polygon_annotator: sv.PolygonAnnotator,
-) -> Dict[str, Optional[str]]:
+def _save_segmentation_artifacts(writer: ThreadedImageWriter, frame_img, seg_detections, seg_index, mask, class_dir, frame_number, file_stem, mask_annotator, polygon_annotator):
     mask_folder = os.path.join(class_dir, "masks")
     os.makedirs(mask_folder, exist_ok=True)
-
     mask_path = os.path.join(mask_folder, f"{frame_number:08d}_{file_stem}.png")
     binary_mask = (mask * 255).astype(np.uint8)
-    cv2.imwrite(mask_path, binary_mask)
-
+    writer.write(mask_path, binary_mask)
+    
+    detection = None
     try:
         detection = sv.Detections(
             xyxy=np.asarray([seg_detections.xyxy[seg_index]], dtype=np.float32),
             mask=np.asarray([mask.astype(bool)], dtype=bool),
-            class_id=np.zeros(1, dtype=np.int32),
+            class_id=np.zeros(1, dtype=np.int32)
         )
-    except Exception:
-        detection = None
-
+    except: pass
+    
     contour_path = None
-    if detection is not None:
+    if detection:
         try:
             contour_img = polygon_annotator.annotate(scene=frame_img.copy(), detections=detection)
             contour_path = os.path.join(mask_folder, f"{frame_number:08d}_{file_stem}_polygon.png")
-            cv2.imwrite(contour_path, contour_img)
-        except Exception:
-            contour_path = None
-
-    background_path = os.path.join(mask_folder, f"{frame_number:08d}_{file_stem}_background.png")
-    frame_bgra = cv2.cvtColor(frame_img, cv2.COLOR_BGR2BGRA)
-    frame_bgra[:, :, 3] = binary_mask
-    cv2.imwrite(background_path, frame_bgra)
-
+            writer.write(contour_path, contour_img)
+        except: pass
+        
+    bg_path = os.path.join(mask_folder, f"{frame_number:08d}_{file_stem}_background.png")
+    f_bgra = cv2.cvtColor(frame_img, cv2.COLOR_BGR2BGRA)
+    f_bgra[:, :, 3] = binary_mask
+    writer.write(bg_path, f_bgra)
+    
     overlay_path = None
-    if detection is not None:
+    if detection:
         try:
-            overlay = mask_annotator.annotate(scene=frame_img.copy(), detections=detection)
+            ov = mask_annotator.annotate(scene=frame_img.copy(), detections=detection)
             overlay_path = os.path.join(mask_folder, f"{frame_number:08d}_{file_stem}_mask.png")
-            cv2.imwrite(overlay_path, overlay)
-        except Exception:
-            overlay_path = None
-
-    polygon_path = contour_path
-
+            writer.write(overlay_path, ov)
+        except: pass
+        
     return {
         "image_path": mask_path,
         "contour_image_path": contour_path,
-        "background_image_path": background_path,
+        "background_image_path": bg_path,
         "mask_overlay_path": overlay_path,
-        "polygon_overlay_path": polygon_path,
+        "polygon_overlay_path": contour_path
     }
 
-
-def _match_keypoints(
-    bbox: np.ndarray,
-    keypoint_detections: Optional[sv.Detections],
-    keypoints: Optional[sv.KeyPoints],
-    class_name: str,
-    *,
-    keypoint_conf_threshold: float,
-    iou_match_threshold: float,
-) -> List[Dict[str, Any]]:
-    if (
-        keypoint_detections is None
-        or keypoint_detections.xyxy is None
-        or len(keypoint_detections) == 0
-        or keypoints is None
-    ):
-        return []
-
-    kp_xy_attr = getattr(keypoints, "xy", None)
-    kp_conf_attr = getattr(keypoints, "confidence", None)
-    if kp_conf_attr is None:
-        kp_conf_attr = getattr(keypoints, "conf", None)
-    if kp_xy_attr is None or kp_conf_attr is None:
-        return []
-
+def _match_keypoints(bbox, keypoint_detections, keypoints, class_name, *, keypoint_conf_threshold, iou_match_threshold):
+    if not keypoint_detections or not keypoints: return []
+    kp_xy = getattr(keypoints, "xy", None)
+    kp_conf = getattr(keypoints, "confidence", getattr(keypoints, "conf", None))
+    if kp_xy is None or kp_conf is None: return []
     pose_boxes = np.asarray(keypoint_detections.xyxy, dtype=np.float32)
-    if pose_boxes.size == 0:
-        return []
-
+    if pose_boxes.size == 0: return []
     ious = sv.box_iou_batch(np.asarray([bbox], dtype=np.float32), pose_boxes)
-    if ious.size == 0:
-        return []
-
+    if ious.size == 0: return []
     best_idx = int(np.argmax(ious[0]))
-    best_iou = float(ious[0, best_idx])
-    if best_iou < iou_match_threshold:
-        return []
-
-    def _to_np(value: Any) -> np.ndarray:
-        if isinstance(value, torch.Tensor):
-            return value.detach().cpu().numpy()
-        return np.asarray(value)
-
-    kp_xy = _to_np(kp_xy_attr)
-    kp_conf = _to_np(kp_conf_attr)
-
-    if best_idx >= kp_xy.shape[0]:
-        return []
-
-    kp_names = VIDEO_OBJECT_DETECTION_KEYPOINT_GROUPING.get(class_name, [])
-    if not kp_names:
-        return []
-
+    if float(ious[0, best_idx]) < iou_match_threshold: return []
+    
+    def _np(v): return v.detach().cpu().numpy() if isinstance(v, torch.Tensor) else np.asarray(v)
+    kp_xy = _np(kp_xy)
+    kp_conf = _np(kp_conf)
+    if best_idx >= kp_xy.shape[0]: return []
+    names = VIDEO_OBJECT_DETECTION_KEYPOINT_GROUPING.get(class_name, [])
+    if not names: return []
     kp_xy = kp_xy[best_idx]
     kp_conf = kp_conf[best_idx]
-
-    results: List[Dict[str, Any]] = []
-    for idx, kp_name in enumerate(kp_names):
-        if idx >= kp_xy.shape[0]:
-            break
-        if kp_conf[idx] <= keypoint_conf_threshold:
-            continue
-        results.append(
-            {
-                "class_id": idx,
-                "class_name": kp_name,
-                "point": {"x": float(kp_xy[idx][0]), "y": float(kp_xy[idx][1])},
-                "confidence": float(kp_conf[idx]),
-            }
-        )
+    results = []
+    for idx, name in enumerate(names):
+        if idx >= kp_xy.shape[0]: break
+        if kp_conf[idx] <= keypoint_conf_threshold: continue
+        results.append({
+            "class_id": idx, "class_name": name,
+            "point": {"x": float(kp_xy[idx][0]), "y": float(kp_xy[idx][1])},
+            "confidence": float(kp_conf[idx])
+        })
     return results
 
-
-def _progress_iter(
-    iterable: Iterable[Tuple[int, np.ndarray]],
-    *,
-    total: Optional[int],
-    debug: bool,
-) -> Tuple[Iterable[Tuple[int, np.ndarray]], contextmanager]:
-    if not debug:
-        return iterable, nullcontext()
-
-    try:
-        progress = tqdm(iterable, desc="Objects", unit="frame", colour="#888888", total=total)
-    except TypeError:
-        progress = tqdm(iterable, desc="Objects", unit="frame", total=total)
-
-    @contextmanager
-    def _ctx():
-        with gray_debug_output(True):
-            try:
-                yield
-            finally:
-                close_fn = getattr(progress, "close", None)
-                if callable(close_fn):
-                    close_fn()
-
-    return progress, _ctx()
-
-
-# ---------------------------------------------------------------------------
-# Main detection entry point
-# ---------------------------------------------------------------------------
-
-
-def handle(
-    input_file: str,
-    output_folder: str,
-    config: "ObjectsConfig | None" = None,
-    *,
-    object_classes: Optional[List[str]] = None,
-    frame_indices: Optional[List[int]] = None,
-    perform_clustering: bool = False,
-    save_annotations: bool = False,
-    debug: bool = False,
-):
-    """Main entry point for object detection.
-
-    Args:
-        input_file: Path to input video file.
-        output_folder: Path to output directory.
-        config: ObjectsConfig instance or None for defaults.
-        object_classes: List of object class names to detect.
-        frame_indices: List of frame indices to process.
-        perform_clustering: Whether to cluster detected objects.
-        save_annotations: Whether to save annotated images.
-        debug: Enable verbose debug output.
-
-    Returns:
-        Tuple of (output_folder, results_list).
-    """
+def handle(input_file: str, output_folder: str, config: "ObjectsConfig | None" = None, *, object_classes: Optional[List[str]] = None, frame_indices: Optional[List[int]] = None, perform_clustering: bool = False, save_annotations: bool = False, debug: bool = False):
     print("INFO: Detecting objects present in the frames")
-
-    # Extract ALL config values upfront - use config values or ObjectsSettings defaults
     if config:
         settings = _ObjectsSettings(
             detection_model=config.detection_model,
@@ -1099,6 +874,9 @@ def handle(
             detector_backend=config.detector_backend,
             clip_model_name=config.clip_model_name,
             cluster_base_eps=config.cluster_base_eps,
+            face_cluster_base_eps=config.face_cluster_base_eps,
+            cluster_dedup_threshold=config.cluster_dedup_threshold,
+            cluster_noise_max_distance=config.cluster_noise_max_distance,
             cluster_min_samples=config.cluster_min_samples,
             cluster_min_attempts=config.cluster_min_attempts,
             keyframe_eps=config.keyframe_eps,
@@ -1109,531 +887,361 @@ def handle(
     else:
         settings = _ObjectsSettings()
 
-    return _detect(
-        input_file,
-        output_folder,
-        object_classes,
-        frame_indices=frame_indices,
-        debug=debug,
-        perform_clustering=perform_clustering,
-        save_annotations=save_annotations,
-        settings=settings,
-    )
+    return _detect(input_file, output_folder, object_classes, frame_indices=frame_indices, debug=debug, perform_clustering=perform_clustering, save_annotations=save_annotations, settings=settings)
 
-
-def _detect(
-    video_file: str,
-    output_folder: str,
-    classes_to_detect: Optional[List[str]],
-    frame_indices: Optional[List[int]] = None,
-    debug: bool = False,
-    *,
-    perform_clustering: bool = True,
-    save_annotations: bool = False,
-    settings: Optional[_ObjectsSettings] = None,
-):
-    """Internal detection implementation."""
-    if settings is None:
-        settings = _ObjectsSettings()
-
+def _detect(video_file, output_folder, classes_to_detect, frame_indices=None, debug=False, *, perform_clustering=True, save_annotations=False, settings=None):
+    if settings is None: settings = _ObjectsSettings()
     _ensure_tensorflow(debug)
-
     output_folder = os.path.join(output_folder, "objects")
-
     save_annotations = bool(save_annotations)
-    should_save_detection_images = save_annotations or perform_clustering
-
-    if classes_to_detect is not None:
-        classes_to_detect = {
-            VIDEO_OBJECT_DETECTION_CATEGORY_MAP[class_name]
-            for class_name in classes_to_detect
-            if class_name in VIDEO_OBJECT_DETECTION_CATEGORY_MAP
-        }
-
-    keypoint_classes = set(VIDEO_OBJECT_DETECTION_KEYPOINT_GROUPING.keys())
-    keypoint_class_ids = {
-        VIDEO_OBJECT_DETECTION_CATEGORY_MAP[name]
-        for name in keypoint_classes
-        if name in VIDEO_OBJECT_DETECTION_CATEGORY_MAP
-    }
-    pose_required = classes_to_detect is None or bool(keypoint_class_ids.intersection(set(classes_to_detect or [])))
-
-    object_model, segmentation_model, pose_model, inference_device = _ensure_yolo_models(
-        debug=debug,
-        require_segmentation=True,
-        require_pose=pose_required,
-        detection_model_name=settings.detection_model,
-        segmentation_model_name=settings.segmentation_model,
-        pose_model_name=settings.pose_model,
-    )
-    debug_print(f"INFO: Using device: {inference_device}", debug=debug)
-
-    if frame_indices is None or not isinstance(frame_indices, list) or not frame_indices:
-        print("No frame indexes provided for object detection")
-        return output_folder, []
-
-    coerced_indices: List[int] = []
-    for idx in frame_indices:
-        if isinstance(idx, (int, np.integer)):
-            coerced_indices.append(int(idx))
-            continue
-        if isinstance(idx, float) and idx.is_integer():
-            coerced_indices.append(int(idx))
-            continue
-        if isinstance(idx, str):
-            stripped = idx.strip()
-            if stripped.isdigit():
-                coerced_indices.append(int(stripped))
-    selected_indices = sorted(set(i for i in coerced_indices if i >= 0))
-    debug_print(f"Selected {len(selected_indices)} frames for object detection", debug=debug)
-
-    if not selected_indices:
-        print("No frames available for object detection")
-        return output_folder, []
-
+    should_save_images = save_annotations or perform_clustering
+    
+    if classes_to_detect:
+        classes_to_detect = {VIDEO_OBJECT_DETECTION_CATEGORY_MAP[c] for c in classes_to_detect if c in VIDEO_OBJECT_DETECTION_CATEGORY_MAP}
+    
+    kp_cls = set(VIDEO_OBJECT_DETECTION_KEYPOINT_GROUPING.keys())
+    kp_ids = {VIDEO_OBJECT_DETECTION_CATEGORY_MAP[n] for n in kp_cls if n in VIDEO_OBJECT_DETECTION_CATEGORY_MAP}
+    pose_req = classes_to_detect is None or bool(kp_ids.intersection(set(classes_to_detect or [])))
+    
+    obj_model, seg_model, pose_model, device = _ensure_yolo_models(debug, True, pose_req, settings.detection_model, settings.segmentation_model, settings.pose_model)
+    
+    if not frame_indices: return output_folder, []
+    s_idx = []
+    for i in frame_indices:
+        try: s_idx.append(int(float(i)))
+        except: pass
+    selected_indices = sorted(list(set(i for i in s_idx if i >= 0)))
+    if not selected_indices: return output_folder, []
+    
     os.makedirs(output_folder, exist_ok=True)
-    video_abs_path = os.path.abspath(video_file)
     fps = _probe_video_fps(video_file)
-
-    tracker_obj = sv.ByteTrack()
-    box_annotator = sv.BoxAnnotator()
-    label_annotator = sv.LabelAnnotator()
-    mask_annotator = sv.MaskAnnotator()
-    polygon_annotator = sv.PolygonAnnotator()
-
-    class_dir_cache: Dict[str, str] = {}
-    frame_iterator = _iterate_selected_frames(video_file, selected_indices, debug=debug)
-
-    iterable, progress_ctx = _progress_iter(frame_iterator, total=len(selected_indices), debug=debug)
-    if not debug:
-        print("INFO: Processing frames for object detection")
-
-    results_list: List[Dict[str, Any]] = []
-    all_faces_data: List[Dict[str, Any]] = []
-    processed_frames = 0
-
-    with progress_ctx:
-        for frame_number, frame_img in iterable:
-            if frame_img is None:
-                continue
-
-            processed_frames += 1
-            frame_reference = f"{video_abs_path}#frame_{frame_number:08d}"
-            height, width = frame_img.shape[:2]
-
-            frame_results: Dict[str, Any] = {
-                "frame_number": frame_number,
-                "frame_path": frame_reference,
-                "resolution": {"width": width, "height": height},
-                "detections": [],
-            }
-
-            time_value = (float(frame_number) / fps) if fps > 0 else None
-            if time_value is not None:
-                try:
-                    frame_results["pts_time"] = float(time_value)
-                except (TypeError, ValueError):
-                    pass
-
-            faces = _detect_faces(
-                frame_number,
-                output_folder,
-                save_faces=should_save_detection_images,
-                frame_img=frame_img,
-                debug=debug,
-                settings=settings,
+    tracker = sv.ByteTrack()
+    box_ann = sv.BoxAnnotator()
+    lbl_ann = sv.LabelAnnotator()
+    mask_ann = sv.MaskAnnotator()
+    poly_ann = sv.PolygonAnnotator()
+    class_dir_cache = {}
+    
+    writer = ThreadedImageWriter(max_workers=4)
+    reader = AsyncVideoReader(video_file, selected_indices)
+    reader.start()
+    
+    pbar_ctx = tqdm(total=len(selected_indices), desc="Objects", unit="frame", colour="#888888") if debug else nullcontext()
+    results_list = []
+    all_faces = []
+    
+    # BATCHING LOGIC
+    batch_frames = []
+    batch_nums = []
+    
+    with pbar_ctx as pbar:
+        for f_num, f_img in reader:
+            batch_frames.append(f_img)
+            batch_nums.append(f_num)
+            
+            if len(batch_frames) >= INFERENCE_BATCH_SIZE:
+                _process_batch(
+                    batch_frames, batch_nums, video_file, fps, 
+                    obj_model, seg_model, pose_model, tracker,
+                    settings, classes_to_detect, kp_cls,
+                    output_folder, should_save_images, save_annotations,
+                    perform_clustering,
+                    class_dir_cache, writer, 
+                    box_ann, lbl_ann, mask_ann, poly_ann,
+                    results_list, all_faces, debug
+                )
+                if pbar: pbar.update(len(batch_frames))
+                batch_frames = []
+                batch_nums = []
+                
+        # Remainder
+        if batch_frames:
+            _process_batch(
+                batch_frames, batch_nums, video_file, fps, 
+                obj_model, seg_model, pose_model, tracker,
+                settings, classes_to_detect, kp_cls,
+                output_folder, should_save_images, save_annotations,
+                perform_clustering,
+                class_dir_cache, writer, 
+                box_ann, lbl_ann, mask_ann, poly_ann,
+                results_list, all_faces, debug
             )
-            all_faces_data.extend(faces)
-            frame_results["detections"].extend(_strip_face_for_results(face) for face in faces)
-
-            with torch.inference_mode():
-                obj_predictions = object_model(
-                    frame_img,
-                    conf=settings.object_conf_threshold,
-                    verbose=False,
-                )
-            if not obj_predictions:
-                results_list.append(frame_results)
-                continue
-
-            obj_result = obj_predictions[0]
-            names = obj_result.names or {}
-            detections = sv.Detections.from_ultralytics(obj_result)
-            if len(detections) == 0:
-                results_list.append(frame_results)
-                continue
-
-            tracked_detections = tracker_obj.update_with_detections(detections)
-
-            seg_detections = None
-            if segmentation_model is not None:
-                with torch.inference_mode():
-                    seg_predictions = segmentation_model(
-                        frame_img,
-                        conf=settings.object_conf_threshold,
-                        verbose=False,
-                    )
-                seg_detections = sv.Detections.from_ultralytics(seg_predictions[0]) if seg_predictions else None
-
-            keypoint_detections = None
-            keypoints = None
-            frame_requires_pose = False
-            if pose_model is not None:
-                detected_class_names = {
-                    names.get(int(cls_id), "")
-                    for cls_id in tracked_detections.class_id
-                    if cls_id is not None
-                }
-                frame_requires_pose = bool(detected_class_names & keypoint_classes)
-
-            if frame_requires_pose and pose_model is not None:
-                with torch.inference_mode():
-                    pose_predictions = pose_model(
-                        frame_img,
-                        conf=settings.object_conf_threshold,
-                        verbose=False,
-                    )
-                keypoint_detections = sv.Detections.from_ultralytics(pose_predictions[0]) if pose_predictions else None
-                keypoints = pose_predictions[0].keypoints if pose_predictions else None
-
-            detection_index_counter = 0
-            for idx in range(len(tracked_detections)):
-                class_id = tracked_detections.class_id[idx]
-                tracker_id = tracked_detections.tracker_id[idx]
-                confidence = tracked_detections.confidence[idx]
-                if confidence is None or confidence < settings.object_conf_threshold:
-                    continue
-                if classes_to_detect is not None and class_id not in classes_to_detect:
-                    continue
-
-                bbox = np.asarray(tracked_detections.xyxy[idx], dtype=np.float32)
-                x1, y1, x2, y2 = [int(v) for v in bbox]
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(width, x2), min(height, y2)
-                if x2 <= x1 or y2 <= y1:
-                    continue
-
-                cropped = frame_img[y1:y2, x1:x2]
-                if cropped.size == 0:
-                    continue
-
-                class_name = names.get(class_id, "N/A") if class_id is not None else "N/A"
-                detection_stem = f"{frame_number:08d}_{detection_index_counter}"
-
-                class_dir: Optional[str] = None
-                cropped_path: Optional[str] = None
-                if should_save_detection_images:
-                    class_dir = _prepare_class_dir(class_dir_cache, output_folder, class_name)
-                    cropped_path = os.path.join(class_dir, f"{detection_stem}.png")
-                    cv2.imwrite(cropped_path, cropped)
-
-                if save_annotations and class_name.lower() == "person" and class_dir is not None:
-                    dets = sv.Detections(
-                        xyxy=np.asarray([[x1, y1, x2, y2]], dtype=np.float32),
-                        confidence=np.asarray([confidence], dtype=np.float32),
-                        class_id=np.asarray([class_id if class_id is not None else 0], dtype=np.int32),
-                    )
-                    annotated = box_annotator.annotate(scene=frame_img.copy(), detections=dets)
-                    annotated = label_annotator.annotate(scene=annotated, detections=dets, labels=[class_name])
-                    ann_path = os.path.join(class_dir, f"{detection_stem}_ann.png")
-                    cv2.imwrite(ann_path, annotated)
-
-                segmentation_info: Dict[str, Optional[str]] = {}
-                if save_annotations and class_dir is not None:
-                    seg_match = _match_segmentation(
-                        bbox, seg_detections,
-                        iou_match_threshold=settings.iou_match_threshold,
-                    )
-                    if seg_match is not None and seg_detections is not None:
-                        seg_idx, mask = seg_match
-                        mask_payload = _save_segmentation_artifacts(
-                            frame_img,
-                            seg_detections,
-                            seg_idx,
-                            mask,
-                            class_dir,
-                            frame_number,
-                            f"{tracker_id if tracker_id is not None else detection_index_counter}",
-                            mask_annotator,
-                            polygon_annotator,
-                        )
-                        segmentation_info = {
-                            "image_path": mask_payload.get("image_path"),
-                            "background_image_path": mask_payload.get("background_image_path"),
-                            "mask_overlay_path": mask_payload.get("mask_overlay_path"),
-                            "polygon_image_path": mask_payload.get("polygon_overlay_path") or mask_payload.get("contour_image_path"),
-                        }
-
-                keypoints_payload = _match_keypoints(
-                    bbox, keypoint_detections, keypoints, class_name,
-                    keypoint_conf_threshold=settings.keypoint_conf_threshold,
-                    iou_match_threshold=settings.iou_match_threshold,
-                )
-
-                detection_dict: Dict[str, Any] = {
-                    "class_id": int(class_id) if class_id is not None else -1,
-                    "class_name": class_name,
-                    "tracker_id": int(tracker_id) if tracker_id is not None else -1,
-                    "confidence": float(confidence),
-                    "image_path": cropped_path if save_annotations and cropped_path else None,
-                    "bounding_box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                    "mask": segmentation_info,
-                    "keypoints": keypoints_payload,
-                }
-
-                frame_results["detections"].append(detection_dict)
-                detection_index_counter += 1
-
-            results_list.append(frame_results)
-
-    if processed_frames == 0:
-        print("WARNING: No frames were processed for object detection")
-        return output_folder, []
-
-    json_payload = {"frames": results_list}
-
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        try:
-            torch.cuda.synchronize()
-        except Exception:
-            pass
-
-    faces_dir = os.path.join(output_folder, "faces")
-    face_clusters_summary: Optional[Dict[str, Any]] = None
-    object_clusters_summary: Optional[Dict[str, Any]] = None
-
+            if pbar: pbar.update(len(batch_frames))
+            
+    reader.stop()
+    writer.shutdown()
+    
+    json_pl = {"frames": results_list}
+    if torch.cuda.is_available(): torch.cuda.empty_cache()
+    
+    f_summ = None
+    o_summ = None
     if perform_clustering:
-        face_clusters_summary = _cluster_faces(all_faces_data, faces_dir, debug=debug, settings=settings)
-        object_clusters_summary = _cluster_objects(class_dir_cache, debug=debug, settings=settings)
-    else:
-        print("INFO: Skipping clustering step (cluster_objects flag disabled).")
-
-    if face_clusters_summary:
-        json_payload["face_clusters"] = face_clusters_summary
-    if object_clusters_summary:
-        json_payload["object_clusters"] = object_clusters_summary
-
-    output_file = os.path.join(output_folder, "objects.json")
-    with open(output_file, "w", encoding="utf-8") as json_file:
-        json.dump(json_payload, json_file, indent=4, cls=_NumpyEncoder)
-
+        f_dir = os.path.join(output_folder, "faces")
+        f_summ = _cluster_faces(all_faces, f_dir, debug=debug, settings=settings)
+        o_summ = _cluster_objects(class_dir_cache, debug=debug, settings=settings)
+        
+    if f_summ: json_pl["face_clusters"] = f_summ
+    if o_summ: json_pl["object_clusters"] = o_summ
+    
+    with open(os.path.join(output_folder, "objects.json"), "w") as f:
+        json.dump(json_pl, f, indent=4, cls=_NumpyEncoder)
     if not save_annotations:
-        _cleanup_annotation_outputs(faces_dir)
-        for class_dir in set(class_dir_cache.values()):
-            _cleanup_annotation_outputs(class_dir)
-
+        _cleanup_annotation_outputs(os.path.join(output_folder, "faces"))
+        for d in set(class_dir_cache.values()): _cleanup_annotation_outputs(d)
+        
     return output_folder, results_list
 
+def _process_batch(frames, f_nums, v_file, fps, o_model, s_model, p_model, tracker, settings, cls_detect, kp_cls, out_dir, save_imgs, save_ann, perform_clustering, dir_cache, writer, box_ann, lbl_ann, mask_ann, poly_ann, res_list, all_faces, debug):
+    """Internal helper to handle a batch of frames."""
+    # 1. Faces (Sequential per frame because DeepFace is heavy/complex)
+    # Note: We do this first to keep it simple, though parallelizing DeepFace is hard.
+    # The optimization here is we are not blocking I/O for saving face crops.
+    for i, f_img in enumerate(frames):
+        faces = _detect_faces(f_nums[i], out_dir, save_imgs, f_img, debug, settings, writer)
+        all_faces.extend(faces)
+        
+        h, w = f_img.shape[:2]
+        r = {
+            "frame_number": f_nums[i],
+            "frame_path": f"{os.path.abspath(v_file)}#frame_{f_nums[i]:08d}",
+            "resolution": {"width": w, "height": h},
+            "detections": [_strip_face_for_results(f) for f in faces]
+        }
+        if fps > 0: r["pts_time"] = float(f_nums[i]) / fps
+        res_list.append(r)
 
-# ---------------------------------------------------------------------------
-# Face detection and clustering
-# ---------------------------------------------------------------------------
+    # 2. YOLO Inference (Batch)
+    with torch.inference_mode():
+        o_preds = o_model(frames, conf=settings.object_conf_threshold, verbose=False)
+        s_preds = s_model(frames, conf=settings.object_conf_threshold, verbose=False) if s_model else [None]*len(frames)
+        # Pose needs class checks, usually runs if person/animal detected.
+        # Running it on the batch is usually faster than checking per frame unless sparse.
+        p_preds = p_model(frames, conf=settings.object_conf_threshold, verbose=False) if p_model else [None]*len(frames)
 
-def _detect_faces(
-    frame_identifier: Any,
-    output_folder: str,
-    save_faces: bool = True,
-    frame_img: Optional[np.ndarray] = None,
-    debug: bool = False,
-    *,
-    settings: Optional[_ObjectsSettings] = None,
-) -> List[Dict[str, Any]]:
-    """Internal face detection implementation."""
-    if settings is None:
-        settings = _ObjectsSettings()
+    # 3. Process Results Frame-by-Frame (Tracking must be sequential)
+    for i, f_img in enumerate(frames):
+        r_entry = res_list[-(len(frames) - i)] # Get the correct entry we created above
+        
+        o_res = o_preds[i]
+        if not o_res or not o_res.boxes: continue
+        
+        names = o_res.names
+        dets = sv.Detections.from_ultralytics(o_res)
+        
+        # Track
+        tracked = tracker.update_with_detections(dets)
+        
+        s_res = s_preds[i]
+        seg_dets = sv.Detections.from_ultralytics(s_res) if s_res else None
+        
+        p_res = p_preds[i]
+        kp_dets = sv.Detections.from_ultralytics(p_res) if p_res else None
+        kps = p_res.keypoints if p_res else None
+        
+        cnt = 0
+        h, w = f_img.shape[:2]
+        
+        for k in range(len(tracked)):
+            cid = tracked.class_id[k]
+            tid = tracked.tracker_id[k]
+            conf = tracked.confidence[k]
+            
+            if conf < settings.object_conf_threshold: continue
+            if cls_detect and cid not in cls_detect: continue
+            
+            bbox = tracked.xyxy[k].astype(int)
+            x1, y1 = max(0, bbox[0]), max(0, bbox[1])
+            x2, y2 = min(w, bbox[2]), min(h, bbox[3])
+            if x2<=x1 or y2<=y1: continue
+            
+            c_name = names.get(cid, "N/A")
+            stem = f"{f_nums[i]:08d}_{cnt}"
+            
+            crop_path = None
+            c_dir = None
+            seg_match = None
+            if save_imgs:
+                c_dir = _prepare_class_dir(dir_cache, out_dir, c_name)
+                crop_path = os.path.join(c_dir, f"{stem}.png")
+                crop_img = f_img[y1:y2, x1:x2]
+                writer.write(crop_path, crop_img)
 
-    frame_path = None
-    if isinstance(frame_identifier, int):
-        frame_number = frame_identifier
-        frame_name = f"{frame_number:08d}.png"
-    else:
-        frame_path = frame_identifier
-        frame_name = os.path.basename(frame_path)
-        try:
-            frame_number = int(frame_name.split("_")[-1].split(".")[0])
-        except ValueError:
-            frame_number = 0
+                # Save background-removed crop for clustering features.
+                # Uses gray fill (≈ ImageNet mean) so CLIP treats masked
+                # pixels as neutral, and tight-crops to the foreground
+                # bounding-box so the subject fills the frame.
+                if perform_clustering:
+                    seg_match = None
+                    if seg_dets is not None:
+                        seg_match = _match_segmentation(
+                            [x1, y1, x2, y2], seg_dets,
+                            iou_match_threshold=settings.iou_match_threshold,
+                        )
+                    seg_crop_dir = os.path.join(c_dir, "_seg")
+                    os.makedirs(seg_crop_dir, exist_ok=True)
+                    seg_crop_path = os.path.join(seg_crop_dir, f"{stem}.png")
+                    if seg_match:
+                        _, full_mask = seg_match
+                        crop_mask = full_mask[y1:y2, x1:x2]
+                        masked = crop_img.copy()
+                        # Gray fill ≈ ImageNet mean (BGR order) to minimise
+                        # CLIP background bias vs black (which produces
+                        # strong negative features after normalisation).
+                        masked[crop_mask == 0] = [104, 116, 122]
+                        # Tight-crop to foreground bbox so CLIP focuses
+                        # on the subject rather than surrounding fill.
+                        fg_rows = np.any(crop_mask, axis=1)
+                        fg_cols = np.any(crop_mask, axis=0)
+                        if fg_rows.any() and fg_cols.any():
+                            r0, r1 = np.where(fg_rows)[0][[0, -1]]
+                            c0, c1 = np.where(fg_cols)[0][[0, -1]]
+                            masked = masked[r0:r1 + 1, c0:c1 + 1]
+                        writer.write(seg_crop_path, masked)
+                    else:
+                        # Fallback: save original crop so clustering still works
+                        writer.write(seg_crop_path, crop_img)
 
-    if frame_img is None and frame_path:
-        frame_img = cv2.imread(frame_path)
-    if frame_img is None:
-        return []
+            if save_ann and c_name.lower() == "person" and c_dir:
+                try:
+                    _d = sv.Detections(
+                        xyxy=np.array([[x1, y1, x2, y2]], dtype=np.float32),
+                        confidence=np.array([conf], dtype=np.float32),
+                        class_id=np.array([cid], dtype=int)
+                    )
+                    ann = box_ann.annotate(f_img.copy(), _d)
+                    ann = lbl_ann.annotate(ann, _d, labels=[c_name])
+                    writer.write(os.path.join(c_dir, f"{stem}_ann.png"), ann)
+                except: pass
+                
+            seg_info = {}
+            if save_ann and c_dir:
+                ann_seg_match = seg_match if (perform_clustering and seg_match) else _match_segmentation([x1, y1, x2, y2], seg_dets, iou_match_threshold=settings.iou_match_threshold)
+                if ann_seg_match:
+                    si, mask = ann_seg_match
+                    payload = _save_segmentation_artifacts(
+                        writer, f_img, seg_dets, si, mask, c_dir, f_nums[i], 
+                        str(tid) if tid is not None else str(cnt), mask_ann, poly_ann
+                    )
+                    seg_info = {
+                        "image_path": payload["image_path"],
+                        "background_image_path": payload["background_image_path"],
+                        "mask_overlay_path": payload["mask_overlay_path"],
+                        "polygon_image_path": payload["polygon_overlay_path"]
+                    }
+            
+            kp_info = _match_keypoints([x1, y1, x2, y2], kp_dets, kps, c_name, keypoint_conf_threshold=settings.keypoint_conf_threshold, iou_match_threshold=settings.iou_match_threshold)
+            
+            r_entry["detections"].append({
+                "class_id": int(cid) if cid is not None else -1,
+                "class_name": c_name,
+                "tracker_id": int(tid) if tid is not None else -1,
+                "confidence": float(conf),
+                "image_path": crop_path,
+                "bounding_box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+                "mask": seg_info,
+                "keypoints": kp_info
+            })
+            cnt += 1
 
-    height, width = frame_img.shape[:2]
-    scale_up = max(1.0, settings.face_detect_min_side / float(min(height, width)))
-    scale_up = min(scale_up, settings.face_detect_max_scale)
-    det_img = frame_img if scale_up == 1.0 else cv2.resize(
-        frame_img,
-        None,
-        fx=scale_up,
-        fy=scale_up,
-        interpolation=cv2.INTER_LINEAR,
-    )
-
-    dp_class = _ensure_deepface(debug)
-    faces_raw: Optional[List[Dict[str, Any]]] = [] if dp_class is not None else []
-    if dp_class is not None:
+def _detect_faces(frame_number, output_folder, save_faces, frame_img, debug, settings, writer=None):
+    if frame_img is None: return []
+    h, w = frame_img.shape[:2]
+    
+    # Resize logic
+    s = max(1.0, settings.face_detect_min_side / float(min(h, w)))
+    s = min(s, settings.face_detect_max_scale)
+    det_img = frame_img if s == 1.0 else cv2.resize(frame_img, None, fx=s, fy=s)
+    
+    dp = _ensure_deepface(debug)
+    raw = []
+    if dp:
         try:
             with gray_debug_output(debug):
-                faces_raw = dp_class.extract_faces(
-                    img_path=det_img,
-                    detector_backend=settings.detector_backend,
-                    enforce_detection=False,
-                    align=True,
-                )
-        except Exception:
+                raw = dp.extract_faces(det_img, detector_backend=settings.detector_backend, enforce_detection=False, align=True)
+        except:
+            try:
+                raw = dp.extract_faces(det_img, detector_backend="opencv", enforce_detection=False, align=True)
+            except: pass
+            
+    faces = []
+    if not raw: return faces
+    
+    f_dir = os.path.join(output_folder, "faces")
+    if save_faces: os.makedirs(f_dir, exist_ok=True)
+    
+    for i, d in enumerate(raw):
+        conf = d.get("confidence", 0.0)
+        if conf < settings.face_conf_threshold: continue
+        
+        area = d.get("facial_area", {})
+        x = int(round(area.get("x", 0) / s))
+        y = int(round(area.get("y", 0) / s))
+        fw = int(round(area.get("w", 0) / s))
+        fh = int(round(area.get("h", 0) / s))
+        
+        x1, y1 = max(0, x), max(0, y)
+        x2, y2 = min(w, x+fw), min(h, y+fh)
+        if x2<=x1 or y2<=y1: continue
+        
+        crop_path = None
+        if save_faces:
+            crop = frame_img[y1:y2, x1:x2]
+            crop_path = os.path.join(f_dir, f"{frame_number:08d}_{i}.png")
+            if writer: writer.write(crop_path, crop)
+            else: cv2.imwrite(crop_path, crop)
+            
+        emb = None
+        if dp:
             try:
                 with gray_debug_output(debug):
-                    faces_raw = dp_class.extract_faces(
-                        img_path=det_img,
-                        detector_backend="opencv",
-                        enforce_detection=False,
-                        align=True,
-                    )
-            except Exception:
-                faces_raw = []
-
-    faces: List[Dict[str, Any]] = []
-    if not faces_raw:
-        return faces
-
-    faces_dir = os.path.join(output_folder, "faces")
-    if save_faces:
-        os.makedirs(faces_dir, exist_ok=True)
-
-    for idx, face_data in enumerate(faces_raw):
-        confidence = face_data.get("confidence", 0.0)
-        if confidence < settings.face_conf_threshold:
-            continue
-
-        facial_area = face_data.get("facial_area", {})
-        x = int(round(facial_area.get("x", 0) / scale_up))
-        y = int(round(facial_area.get("y", 0) / scale_up))
-        w = int(round(facial_area.get("w", 0) / scale_up))
-        h = int(round(facial_area.get("h", 0) / scale_up))
-
-        x1 = max(0, x)
-        y1 = max(0, y)
-        x2 = min(width, x + w)
-        y2 = min(height, y + h)
-        if x2 <= x1 or y2 <= y1:
-            continue
-
-        cropped_face = frame_img[y1:y2, x1:x2]
-        cropped_path = os.path.join(faces_dir, f"{frame_number:08d}_{idx}.png") if save_faces else None
-        if save_faces and cropped_path:
-            cv2.imwrite(cropped_path, cropped_face)
-
-        embedding = None
-        if dp_class is not None:
-            try:
-                with gray_debug_output(debug):
-                    embeddings = dp_class.represent(
-                        img_path=face_data.get("face"),
-                        model_name=settings.embedding_model_name,
-                        enforce_detection=False,
-                        detector_backend="skip",
-                        align=False,
-                    )
-                if embeddings and isinstance(embeddings, list):
-                    rep = embeddings[0]
-                    if isinstance(rep, dict) and "embedding" in rep:
-                        embedding = np.array(rep["embedding"], dtype=np.float32)
-            except Exception:
-                embedding = None
-
-        faces.append(
-            {
-                "class_id": 100,
-                "class_name": "face",
-                "confidence": float(confidence),
-                "image_path": os.path.abspath(cropped_path) if save_faces and cropped_path else None,
-                "bounding_box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
-                "embedding": embedding,
-                "embedding_model": settings.embedding_model_name,
-            }
-        )
-
+                    e = dp.represent(d.get("face"), model_name=settings.embedding_model_name, enforce_detection=False, detector_backend="skip", align=False)
+                if e and isinstance(e, list): emb = np.array(e[0]["embedding"], dtype=np.float32)
+            except: pass
+            
+        faces.append({
+            "class_id": 100,
+            "class_name": "face",
+            "confidence": float(conf),
+            "image_path": os.path.abspath(crop_path) if crop_path else None,
+            "bounding_box": {"x1": x1, "y1": y1, "x2": x2, "y2": y2},
+            "embedding": emb,
+            "embedding_model": settings.embedding_model_name
+        })
+        
     return faces
 
-
-def _cluster_faces(
-    all_faces_data: Sequence[Dict[str, Any]],
-    faces_folder: str,
-    *,
-    debug: bool = False,
-    settings: Optional[_ObjectsSettings] = None,
-) -> Optional[Dict[str, Any]]:
-    """Internal face clustering implementation."""
-    if settings is None:
-        settings = _ObjectsSettings()
-
-    detected_faces = len(all_faces_data)
-    print(f"INFO: Starting face clustering for {detected_faces} detected faces.")
-
-    if not os.path.isdir(faces_folder):
-        print(f"WARNING: Faces folder '{faces_folder}' not found; skipping clustering.")
-        return None
-
-    summary = _cluster_class_directory(
-        class_name="faces",
-        image_folder=faces_folder,
-        debug=debug,
-        base_eps=0.20,
+def _cluster_faces(all_faces, faces_dir, debug, settings):
+    print(f"INFO: Clustering {len(all_faces)} faces")
+    if not os.path.isdir(faces_dir): return None
+    summ = _cluster_class_directory(
+        "faces", faces_dir, debug=debug,
+        base_eps=settings.face_cluster_base_eps,
         min_samples=settings.cluster_min_samples,
-        key_eps=settings.keyframe_eps,
-        key_min_samples=settings.keyframe_min_samples,
-        key_hamming_frac=settings.keyframe_hamming_frac,
-        key_require_both=settings.keyframe_require_both,
-        cluster_min_attempts=settings.cluster_min_attempts,
-        clip_model_name=settings.clip_model_name,
+        dedup_threshold=settings.cluster_dedup_threshold,
+        noise_max_distance=settings.cluster_noise_max_distance,
+        key_eps=settings.keyframe_eps, key_min_samples=settings.keyframe_min_samples,
+        key_hamming_frac=settings.keyframe_hamming_frac, key_require_both=settings.keyframe_require_both,
+        cluster_min_attempts=settings.cluster_min_attempts, clip_model_name=settings.clip_model_name,
     )
+    if summ: summ["detected_faces"] = len(all_faces)
+    return summ
 
-    if summary is None:
-        print("WARNING: Face clustering did not produce any results.")
-        return None
-
-    summary["detected_faces"] = detected_faces
-    return summary
-
-
-def _cluster_objects(
-    class_dir_cache: Dict[str, str],
-    *,
-    debug: bool = False,
-    settings: Optional[_ObjectsSettings] = None,
-) -> Dict[str, Dict[str, Any]]:
-    """Internal object clustering implementation."""
-    if settings is None:
-        settings = _ObjectsSettings()
-
-    if not class_dir_cache:
-        print("INFO: No object detections available for clustering.")
-        return {}
-
-    results: Dict[str, Dict[str, Any]] = {}
-
-    for class_name, image_folder in class_dir_cache.items():
-        summary = _cluster_class_directory(
-            class_name=class_name,
-            image_folder=image_folder,
-            debug=debug,
+def _cluster_objects(cache, debug, settings):
+    if not cache: return {}
+    res = {}
+    for c_name, f_dir in cache.items():
+        summ = _cluster_class_directory(
+            c_name, f_dir, debug=debug,
             base_eps=settings.cluster_base_eps,
             min_samples=settings.cluster_min_samples,
-            key_eps=settings.keyframe_eps,
-            key_min_samples=settings.keyframe_min_samples,
-            key_hamming_frac=settings.keyframe_hamming_frac,
-            key_require_both=settings.keyframe_require_both,
-            cluster_min_attempts=settings.cluster_min_attempts,
-            clip_model_name=settings.clip_model_name,
+            dedup_threshold=settings.cluster_dedup_threshold,
+            noise_max_distance=settings.cluster_noise_max_distance,
+            key_eps=settings.keyframe_eps, key_min_samples=settings.keyframe_min_samples,
+            key_hamming_frac=settings.keyframe_hamming_frac, key_require_both=settings.keyframe_require_both,
+            cluster_min_attempts=settings.cluster_min_attempts, clip_model_name=settings.clip_model_name,
         )
-        if summary is None:
-            continue
-        summary["class_name"] = class_name
-        results[class_name] = summary
-
-    if not results:
-        print("INFO: Object clustering skipped (no eligible crops).")
-
-    return results
+        if summ:
+            summ["class_name"] = c_name
+            res[c_name] = summ
+    return res

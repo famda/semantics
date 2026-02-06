@@ -4,12 +4,17 @@ import json
 import logging
 import os
 import shutil
+import queue
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import contextmanager, nullcontext
-from typing import Iterable, List, Optional, Tuple, TYPE_CHECKING
+from typing import Iterable, List, Optional, Tuple, TYPE_CHECKING, Any
 
 import cv2 as _cv
 import numpy as np
 from tqdm import tqdm as _tqdm
+from PIL import Image as _Image
 
 from .utils.logging import debug_print, gray_debug_output
 
@@ -18,8 +23,13 @@ if TYPE_CHECKING:
 
 __all__ = ["handle"]
 
+# Tuning Constants
+BATCH_SIZE = 96  # Increased for higher GPU saturation
+QUEUE_SIZE = 8   # Number of batches to buffer
+SMART_SEEK_THRESHOLD = 32
 
 def _probe_frame_indices(video_file: str, sample_fps: float) -> List[int]:
+    """Determines which frame indices to sample based on FPS."""
     capture = _cv.VideoCapture(video_file)
     if not capture.isOpened():
         return []
@@ -40,28 +50,133 @@ def _probe_frame_indices(video_file: str, sample_fps: float) -> List[int]:
     return list(range(0, total_frames, step))
 
 
+class AsyncVideoLoader:
+    """
+    Reads video frames in a separate thread, applies transforms in parallel workers,
+    and feeds a queue for the GPU consumer.
+    """
+    def __init__(self, video_path: str, indices: List[int], batch_size: int, transform: Any, device: str):
+        self.video_path = video_path
+        self.indices = sorted(indices)
+        self.batch_size = batch_size
+        self.transform = transform
+        self.device = device
+        self.queue = queue.Queue(maxsize=QUEUE_SIZE)
+        self.stop_event = threading.Event()
+        self.loader_thread = None
+        
+    def start(self):
+        self.loader_thread = threading.Thread(target=self._worker, daemon=True)
+        self.loader_thread.start()
+        
+    def _worker(self):
+        import torch
+        cap = _cv.VideoCapture(self.video_path)
+        current_pos = -1
+        
+        batch_frames = []
+        batch_indices = []
+        
+        # Helper for transforming a single frame (runs in thread pool)
+        def _prep_frame(bgr_img):
+            # Convert BGR -> RGB -> PIL -> Tensor
+            rgb = _cv.cvtColor(bgr_img, _cv.COLOR_BGR2RGB)
+            pil = _Image.fromarray(rgb)
+            return self.transform(pil)
+
+        # ThreadPool for CPU-bound transformations
+        # Workers = 4 is usually sweet spot for feeding one GPU
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for target_idx in self.indices:
+                if self.stop_event.is_set():
+                    break
+                
+                # Smart Seek Logic
+                gap = target_idx - current_pos - 1
+                if gap == 0:
+                    pass
+                elif 0 < gap < SMART_SEEK_THRESHOLD:
+                    for _ in range(gap): cap.grab()
+                else:
+                    cap.set(_cv.CAP_PROP_POS_FRAMES, float(target_idx))
+                
+                ret, frame = cap.read()
+                current_pos = target_idx
+                
+                if not ret:
+                    break
+                
+                batch_frames.append(frame)
+                batch_indices.append(target_idx)
+                
+                if len(batch_frames) >= self.batch_size:
+                    # Parallel Transform
+                    tensors = list(pool.map(_prep_frame, batch_frames))
+                    
+                    # Stack on CPU, pin memory for faster transfer if CUDA
+                    try:
+                        batch_tensor = torch.stack(tensors)
+                        if self.device == 'cuda':
+                            batch_tensor = batch_tensor.pin_memory()
+                    except Exception:
+                        batch_tensor = None
+                        
+                    self.queue.put((batch_indices, batch_tensor, [f.copy() for f in batch_frames]))
+                    
+                    batch_frames = []
+                    batch_indices = []
+
+            # Cleanup remaining
+            if batch_frames and not self.stop_event.is_set():
+                tensors = list(pool.map(_prep_frame, batch_frames))
+                try:
+                    batch_tensor = torch.stack(tensors)
+                except:
+                    batch_tensor = None
+                self.queue.put((batch_indices, batch_tensor, [f.copy() for f in batch_frames]))
+
+        cap.release()
+        self.queue.put(None) # Sentinel
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        item = self.queue.get()
+        if item is None:
+            raise StopIteration
+        return item
+
+    def stop(self):
+        self.stop_event.set()
+        # Drain queue to allow thread to exit
+        while not self.queue.empty():
+            try: self.queue.get_nowait()
+            except: pass
+
+
 def handle(
     input_file: str,
     output_folder: str,
     config: "ClusteringConfig | None" = None,
     *,
+    save_frames: bool = False,
     debug: bool = False,
     device=None,
     workers=None,
 ) -> Tuple[str, List[dict], str]:
-    """Main entry point for frame clustering.
+    """Main entry point for frame clustering."""
+    
+    # User Request:
+    # 1. If save_frames=True, FORCE save both keyframes and clusters.
+    # 2. If save_frames=False, FORCE save neither (avoid empty folders).
+    if save_frames:
+        should_save_keyframes = True
+        should_save_clusters = True
+    else:
+        should_save_keyframes = False
+        should_save_clusters = False
 
-    Args:
-        input_file: Path to input video file.
-        output_folder: Path to output directory.
-        config: ClusteringConfig instance or None for defaults.
-        debug: Enable verbose debug output.
-        device: Device for inference (cuda/cpu).
-        workers: Number of parallel workers.
-
-    Returns:
-        Tuple of (clusters_folder, frame_data, clusters_json_path).
-    """
     return _cluster_frames(
         input_file,
         output_folder,
@@ -76,8 +191,8 @@ def handle(
         kf_min_samples=config.kf_min_samples if config else 1,
         kf_hamming_frac=config.kf_hamming_frac if config else 0.30,
         kf_require_both=config.kf_require_both if config else True,
-        save_keyframes=config.save_keyframes if config else True,
-        save_clusters=config.save_clusters if config else False,
+        save_keyframes=should_save_keyframes,
+        save_clusters=should_save_clusters,
         debug=debug,
     )
 
@@ -109,6 +224,7 @@ def _cluster_frames(
     frame_numbers: List[int] = _probe_frame_indices(video_file, fps_arg or 1.0)
     frame_data: List[dict] = [{"index": int(idx)} for idx in frame_numbers]
 
+    # Silence PIL
     for _pil_logger in ("PIL", "PIL.Image", "PIL.PngImagePlugin"):
         logging.getLogger(_pil_logger).setLevel(logging.WARNING)
 
@@ -118,529 +234,432 @@ def _cluster_frames(
         print("No frames available for clustering")
         return clusters_root, [], report_path
 
-    output_folder = clusters_root
-
-    # Clean existing clusters folder before starting
-    if os.path.isdir(output_folder):
+    if os.path.isdir(clusters_root):
         print("INFO: Cleaning existing clusters folder")
-        debug_print(f"Removing {output_folder}", debug=debug)
         try:
-            shutil.rmtree(output_folder)
+            shutil.rmtree(clusters_root)
         except Exception as e:
             print(f"Warning: Failed to clean clusters folder: {e}")
 
-    os.makedirs(output_folder, exist_ok=True)
-
+    os.makedirs(clusters_root, exist_ok=True)
     video_abs_path = os.path.abspath(video_file)
 
-    # Open the video and loop only through the selected frame indices (no clustering yet)
-    print("INFO: Reading frames & extracting features")
-    cap = _cv.VideoCapture(video_file)
-    if not cap.isOpened():
-        print("Failed to open video for reading")
-        return output_folder, frame_data, report_path
-
-    processed = 0
-    # Prepare clusters.json inside the 'clusters' output folder
-    frames_entries = []
-    # Write initial empty report
-    try:
-        with open(report_path, "w", encoding="utf-8") as f:
-            json.dump({"clusters": 0, "frames": []}, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Failed to initialize clusters.json: {e}")
-
-    # Load MobileNet to extract features for clustering (only for selected frames) - same as original script
+    # --- Step 1: Model Setup (With FP16) ---
     import torch as _torch
     import timm as _timm
 
+    print("INFO: Reading frames & extracting features")
+    
     with gray_debug_output(debug):
         dev = device if device in ("cpu", "cuda") else ("cuda" if _torch.cuda.is_available() else "cpu")
         model = _timm.create_model('mobilenetv3_large_100', pretrained=True, num_classes=0).to(dev)
         model.eval()
+        
+        # Use FP16 for speed if on CUDA
+        if dev == 'cuda':
+            model.half()
+            
         data_config = _timm.data.resolve_model_data_config(model)
         transform = _timm.data.create_transform(**data_config, is_training=False)
 
-    debug_print(f"Using device '{dev}' for clustering", debug=debug)
-    def _feat_from_bgr(frame_bgr):
-        from PIL import Image as _Image
-        frame_rgb = _cv.cvtColor(frame_bgr, _cv.COLOR_BGR2RGB)
-        pil = _Image.fromarray(frame_rgb)
-        with _torch.no_grad():
-            inp = transform(pil).unsqueeze(0).to(dev)
-            feat = model(inp)
-        return feat.detach().cpu().numpy().flatten()
-    def _feat_from_pil(pil_image):
-        with _torch.no_grad():
-            inp = transform(pil_image.convert("RGB")).unsqueeze(0).to(dev)
-            feat = model(inp)
-        return feat.detach().cpu().numpy().flatten()
+    debug_print(f"Using device '{dev}' (FP16 enabled)" if dev == 'cuda' else f"Using device '{dev}'", debug=debug)
 
-    # Helper to wrap iterables with tqdm only when debug progress is desired
-    def _progress_iter(it: Iterable, desc: Optional[str] = None, unit: Optional[str] = None):
-        if _tqdm and debug:
-            kwargs = {}
-            if desc is not None:
-                kwargs["desc"] = desc
-            if unit is not None:
-                kwargs["unit"] = unit
-            try:
-                tqdm_iter = _tqdm(it, colour="#888888", **kwargs)
-            except TypeError:
-                tqdm_iter = _tqdm(it, **kwargs)
+    # --- Step 2: Pipelined Feature Extraction ---
+    # The AsyncVideoLoader handles IO and CPU transform in background threads
+    loader = AsyncVideoLoader(video_file, frame_numbers, BATCH_SIZE, transform, dev)
+    loader.start()
 
-            @contextmanager
-            def _ctx():
-                with gray_debug_output(True):
-                    try:
-                        yield
-                    finally:
-                        close_fn = getattr(tqdm_iter, "close", None)
-                        if callable(close_fn):
-                            close_fn()
-
-            return tqdm_iter, _ctx()
-        return it, nullcontext()
-
-    iterable, progress_ctx = _progress_iter(frame_numbers, desc="Reading frames", unit="frame")
     selected_indices: List[int] = []
     selected_paths: List[str] = []
     feats: List[np.ndarray] = []
-    with progress_ctx:
-        for idx in iterable:
-            try:
-                cap.set(_cv.CAP_PROP_POS_FRAMES, int(idx))
-                ret, frame = cap.read()
-                if not ret:
-                    # Could not read this frame index; skip
-                    continue
-                # Placeholder: here we'll compute features and cluster later
-                processed += 1
-                # Collect for clustering and final report (reference back to the source video)
-                frame_reference = f"{video_abs_path}#frame_{int(idx):08d}"
-                selected_indices.append(int(idx))
-                selected_paths.append(frame_reference)
-                try:
-                    feats.append(_feat_from_bgr(frame))
-                except Exception:
-                    # If feature extraction fails, append a dummy vector to keep alignment
-                    feats.append(np.zeros((1,), dtype=np.float32))
-            except Exception:
-                # Skip any problematic index
-                continue
+    
+    # We may need raw frames later for saving, but keeping them all in memory is OOM risk.
+    # We will re-read them if needed (SmartSeek makes this tolerable), 
+    # OR we write them immediately if save_clusters=True is likely.
+    # However, we don't know the cluster labels yet. So we can't save them to cluster folders.
+    # We MUST re-read later. 
 
-    cap.release()
-    print(f"INFO: Processed {processed} / {len(frame_numbers)} selected frames from video")
-    debug_print(f"Generated {len(feats)} feature vectors", debug=debug)
-    # Perform clustering on the collected features (only selected frames) using the original logic
+    processed_count = 0
+    pbar_ctx = _tqdm(total=len(frame_numbers), desc="Extracting features", unit="frame", colour="#888888") if debug else nullcontext()
+
+    with pbar_ctx as pbar:
+        try:
+            for b_indices, b_tensor, _ in loader:
+                if b_tensor is not None:
+                    # Move to GPU
+                    # non_blocking=True allows overlap with CPU work
+                    inp = b_tensor.to(dev, non_blocking=True)
+                    if dev == 'cuda':
+                        inp = inp.half()
+                    
+                    with _torch.no_grad():
+                        out = model(inp).cpu().numpy().astype(np.float32)
+                    
+                    for i, f_vec in enumerate(out):
+                        idx_val = b_indices[i]
+                        selected_indices.append(idx_val)
+                        selected_paths.append(f"{video_abs_path}#frame_{int(idx_val):08d}")
+                        feats.append(f_vec.flatten())
+                
+                cnt = len(b_indices)
+                processed_count += cnt
+                if pbar: pbar.update(cnt)
+        except Exception as e:
+            print(f"Error in feature extraction loop: {e}")
+        finally:
+            loader.stop()
+
+    print(f"INFO: Processed {processed_count} frames")
+
+    # --- Step 3: Clustering (DBSCAN) ---
+    labels = np.zeros(len(feats), dtype=int)
+    
     if feats:
         try:
-            print("INFO: Clustering features (DBSCAN on candidates)")
+            print("INFO: Clustering features (DBSCAN)")
             from sklearn.cluster import DBSCAN as _DBSCAN
             feat_mat = np.stack(feats, axis=0)
-            # Candidate selection via threshold between consecutive features
-            cand_indices_local: list[int] = []
-            cand_feats_local: list[np.ndarray] = []
+            
+            # 1. Candidate Generation (Linear Scan)
+            cand_indices_local = []
+            cand_feats_local = []
+            
+            # Pre-normalize for dot product speed
+            norms = np.linalg.norm(feat_mat, axis=1, keepdims=True) + 1e-8
+            normalized_feats = feat_mat / norms
+            
             last_feat = None
-            for j, f in enumerate(feat_mat):
+            
+            # Using simple loop is fastest for sequential dependency
+            for j, f_norm in enumerate(normalized_feats):
                 if last_feat is None:
                     cand_indices_local.append(j)
-                    cand_feats_local.append(f)
-                    last_feat = f
+                    cand_feats_local.append(f_norm)
+                    last_feat = f_norm
                 else:
-                    n1 = last_feat / (np.linalg.norm(last_feat) + 1e-8)
-                    n2 = f / (np.linalg.norm(f) + 1e-8)
-                    sim = float(np.dot(n1, n2))
+                    # dot product of normalized vectors = cosine similarity
+                    sim = float(np.dot(last_feat, f_norm))
                     if sim < float(mn_threshold):
                         cand_indices_local.append(j)
-                        cand_feats_local.append(f)
-                        last_feat = f
+                        cand_feats_local.append(f_norm)
+                        last_feat = f_norm
 
-            # DBSCAN on candidate features (cosine)
-            if len(cand_feats_local) == 0:
-                labels = np.zeros((len(feat_mat),), dtype=int)
-                centroids = None
-            else:
+            # 2. DBSCAN on Candidates
+            if cand_feats_local:
                 cand_mat = np.stack(cand_feats_local, axis=0)
-                cand_labels = _DBSCAN(eps=float(mn_eps), min_samples=int(mn_min_samples), metric='cosine').fit_predict(cand_mat)
-                # Reindex candidate labels
-                uniq = sorted(set(int(l) for l in cand_labels if l >= 0))
-                mapping = {old: new for new, old in enumerate(uniq)}
-                for i_lab, l in enumerate(cand_labels):
-                    if l >= 0:
-                        cand_labels[i_lab] = mapping[int(l)]
-                # Centroids per candidate cluster
-                K = int(cand_labels.max() + 1) if cand_labels.size else 0
-                centroids = []
-                for cid in range(K):
-                    centroids.append(cand_mat[cand_labels == cid].mean(axis=0))
-                centroids = np.stack(centroids, axis=0) if K > 0 else None
-                # Assign labels to all selected frames by nearest centroid
-                labels = np.zeros((len(feat_mat),), dtype=int)
-                if centroids is not None and centroids.shape[0] > 0:
-                    C = centroids / (np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-8)
-                    for j, f in enumerate(feat_mat):
-                        ff = f / (np.linalg.norm(f) + 1e-8)
-                        dists = 1.0 - np.dot(C, ff)
-                        labels[j] = int(np.argmin(dists))
+                # Compute DBSCAN
+                cand_labels = _DBSCAN(eps=float(mn_eps), min_samples=int(mn_min_samples), metric='cosine', n_jobs=-1).fit_predict(cand_mat)
+                
+                # 3. Assign remaining frames to Centroids
+                unique_labels = set(cand_labels)
+                if -1 in unique_labels: unique_labels.remove(-1)
+                
+                K = max(unique_labels) + 1 if unique_labels else 0
+                
+                if K > 0:
+                    centroids = np.zeros((K, cand_mat.shape[1]), dtype=cand_mat.dtype)
+                    for cid in range(K):
+                        centroids[cid] = cand_mat[cand_labels == cid].mean(axis=0)
+                    
+                    # Normalize centroids
+                    centroids /= (np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-8)
+                    
+                    # Matrix multiplication for all-pairs similarity (Vectorized assignment)
+                    # (N, D) @ (K, D).T -> (N, K) cosine similarities
+                    sims = np.dot(normalized_feats, centroids.T)
+                    # 1 - sim = dist
+                    labels = np.argmax(sims, axis=1) # argmax sim == argmin dist
                 else:
                     labels[:] = 0
 
-            # Reindex final labels to 0..K-1 keeping -1 (not present here) consistent
-            labels = labels.copy()
+            # Reindex labels
             uniq_final = sorted(set(int(l) for l in labels if l >= 0))
             mapping_final = {old: new for new, old in enumerate(uniq_final)}
-            for i_lab, l in enumerate(labels):
-                if l >= 0:
-                    labels[i_lab] = mapping_final[int(l)]
+            labels = np.array([mapping_final.get(int(l), -1) for l in labels])
 
-            # Build final frames entries including cluster_number and optional keyframe flag
-            frames_entries = []
-            for k, (idx_val, path_val, lbl) in enumerate(zip(selected_indices, selected_paths, labels)):
-                entry = {
-                    "index": int(idx_val),
-                    "frame_index": int(idx_val),
-                    "path": path_val,
-                    "cluster_number": int(lbl),
-                }
-                frames_entries.append(entry)
-            clusters_count = len(set(int(l) for l in labels if int(l) >= 0))
-            with open(report_path, "w", encoding="utf-8") as f:
-                json.dump({"clusters": clusters_count, "frames": frames_entries}, f, ensure_ascii=False, indent=2)
-            frame_data = frames_entries
         except Exception as e:
-            print(f"Failed to cluster selected frames: {e}")
+            print(f"Clustering failed: {e}")
+            labels = np.zeros(len(feats), dtype=int)
 
-    # Final confirmation of report path
-    if os.path.exists(report_path):
-        debug_print(f"Cluster report contains {len(frames_entries)} entries", debug=debug)
+    # Build Report
+    frames_entries = []
+    for idx_val, path_val, lbl in zip(selected_indices, selected_paths, labels):
+        frames_entries.append({
+            "index": int(idx_val),
+            "frame_index": int(idx_val),
+            "path": path_val,
+            "cluster_number": int(lbl),
+        })
+    
+    clusters_count = len(set(int(l) for l in labels if int(l) >= 0))
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump({"clusters": clusters_count, "frames": frames_entries}, f, ensure_ascii=False, indent=2)
 
-    # Optionally save clustered frames into folders like the original script
-    if feats and save_clusters:
-        out_dir = output_folder  # already points to .../clusters
-        os.makedirs(out_dir, exist_ok=True)
-        cap2 = _cv.VideoCapture(video_file)
-        if not cap2.isOpened():
-            print("Failed to reopen video for writing frames")
-        else:
-            iterable2, progress_ctx = _progress_iter(range(len(selected_indices)), desc="Writing PNGs", unit="img")
-            # Optional threaded writing if workers > 0
-            pool = None
-            futures = []
-            limit = max(64, int(workers) * 4) if (workers and int(workers) > 0) else 0
-            if workers and int(workers) > 0:
-                import concurrent.futures as _cf
-                pool = _cf.ThreadPoolExecutor(max_workers=int(workers))
-            def _write_png(path_dst: str, img) -> bool:
-                return _cv.imwrite(path_dst, img)
-            with progress_ctx:
-                for k in iterable2:
-                    idx_val = int(selected_indices[k])
-                    lbl = int(labels[k]) if 'labels' in locals() else 0
-                    cap2.set(_cv.CAP_PROP_POS_FRAMES, idx_val)
-                    ret, frame = cap2.read()
-                    if not ret:
-                        continue
-                    cdir = os.path.join(out_dir, str(lbl))
-                    os.makedirs(cdir, exist_ok=True)
-                    dst = os.path.join(cdir, f"{idx_val:08d}.png")
-                    if pool:
-                        if len(futures) >= limit:
-                            futures.pop(0).result()
-                        futures.append(pool.submit(_write_png, dst, frame.copy()))
-                    else:
-                        _cv.imwrite(dst, frame)
-            if futures:
-                for f in futures:
-                    f.result()
-            if pool:
-                pool.shutdown(wait=True)
-            cap2.release()
-            debug_print("Finished writing clustered frame images", debug=debug)
-
-    # Post-clustering keyframes step (mirrors original behavior)
-    if save_keyframes and not keyframes:
-        # Mirror original behavior: keyframes are only extracted when 'keyframes' is True
-        print("Keyframe saving requested but 'keyframes' flag is False; skipping per original logic.")
-    if keyframes and save_keyframes:
-        print("INFO: Extracting keyframes per cluster")
-        # Helper pHash functions
-        def _dct_matrix(n: int) -> np.ndarray:
+    # --- Step 4: Save Clusters & Keyframes (Optimized I/O) ---
+    # Always run keyframe selection if keyframes=True, but only save images if save_keyframes/save_clusters
+    
+    if keyframes and feats:
+        
+        # Prepare for Keyframe extraction (Precompute DCT matrices)
+        def _get_dct_matrix(n: int) -> np.ndarray:
             k = np.arange(n)[:, None]
             n_ = np.arange(n)[None, :]
             mat = np.cos(np.pi * (n_ + 0.5) * k / n)
             mat[0, :] = mat[0, :] / np.sqrt(n)
             mat[1:, :] = mat[1:, :] * np.sqrt(2 / n)
             return mat.astype(np.float32)
-        def _dct_2d(a: np.ndarray) -> np.ndarray:
-            N, M = a.shape
-            Cn = _dct_matrix(N)
-            Cm = _dct_matrix(M)
-            return Cn @ a @ Cm.T
-        def _phash64_pil(im, hash_size: int = 8, highfreq_factor: int = 4) -> int:
-            from PIL import Image as _Image
-            size = hash_size * highfreq_factor
-            img = im.convert("L").resize((size, size), _Image.Resampling.LANCZOS)
-            pixels = np.asarray(img, dtype=np.float32)
-            dct = _dct_2d(pixels)
-            low = dct[:hash_size, :hash_size].flatten()
-            med = np.median(low[1:]) if low.size > 1 else low[0]
-            bits = (low > med).astype(np.uint8)
-            v = 0
-            for b in bits:
-                v = (v << 1) | int(b)
-            return int(v)
-        from sklearn.cluster import DBSCAN as _DBSCAN2
-        out_dir = output_folder
-        os.makedirs(out_dir, exist_ok=True)
-        # Build label map for selected frames only if needed (video path without saved clusters)
-        if save_clusters:
-            # Compute keyframes by scanning images saved in each cluster directory (replicates original logic)
-            from PIL import Image as _Image
-            try:
-                cluster_dirs = [
-                    d for d in sorted(
-                        os.listdir(out_dir),
-                        key=lambda n: (0, int(n)) if n.lstrip('-').isdigit() else (1, n),
-                    )
-                    if os.path.isdir(os.path.join(out_dir, d)) and d != 'keyframes'
-                ]
-            except Exception:
-                cluster_dirs = []
 
-            iterable_dirs, progress_dirs = _progress_iter(cluster_dirs, desc='Keyframes', unit='dir')
-            with progress_dirs:
-                for cname in iterable_dirs:
-                    cdir = os.path.join(out_dir, cname)
-                    files = [
-                        os.path.join(cdir, fn)
-                        for fn in sorted(os.listdir(cdir))
-                        if os.path.isfile(os.path.join(cdir, fn))
-                        and os.path.splitext(fn)[1].lower() in {'.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp'}
-                    ]
-                    if not files:
-                        continue
+        _DCT_SIZE = 32
+        _DCT_MAT = _get_dct_matrix(_DCT_SIZE)
+        _DCT_MAT_T = _DCT_MAT.T
 
-                    feats_kf: list[np.ndarray] = []
-                    phashes: list[int] = []
-                    iterable_f, progress_files = _progress_iter(files, desc=f'Feats {cname}', unit='img')
-                    with progress_files:
-                        for fp in iterable_f:
-                            try:
-                                with _Image.open(fp) as im:
-                                    feats_kf.append(_feat_from_pil(im))
-                            except Exception:
-                                feats_kf.append(np.zeros((1,), dtype=np.float32))
+        # Optimized pHash using OpenCV Resize
+        def _batch_phash64_cv2(images_bgr: List[np.ndarray], hash_size=8) -> List[int]:
+            if not images_bgr: return []
+            
+            # Batch prep: Resize and Color Convert
+            # OpenCV resize is faster than PIL
+            arrs = []
+            for img in images_bgr:
+                gray = _cv.cvtColor(img, _cv.COLOR_BGR2GRAY)
+                # INTER_LANCZOS4 matches PIL LANCZOS closely
+                small = _cv.resize(gray, (_DCT_SIZE, _DCT_SIZE), interpolation=_cv.INTER_LANCZOS4)
+                arrs.append(small.astype(np.float32))
+            
+            batch = np.stack(arrs) 
+            dct_batch = _DCT_MAT @ batch @ _DCT_MAT_T
+            
+            low_freq = dct_batch[:, :hash_size, :hash_size]
+            flat = low_freq.reshape(len(images_bgr), -1)
+            dc_removed = flat[:, 1:]
+            medians = np.median(dc_removed, axis=1, keepdims=True)
+            bits = (flat > medians)
+            
+            hashes = []
+            powers = (1 << np.arange(64 - 1, -1, -1)).astype(np.uint64)
+            for row in bits:
+                val = np.sum(row * powers, dtype=np.uint64)
+                hashes.append(int(val))
+            return hashes
 
-                    for fp in files:
-                        try:
-                            with _Image.open(fp) as im:
-                                phashes.append(_phash64_pil(im))
-                        except Exception:
-                            phashes.append(0)
+        # Map indices to labels
+        idx_to_label = {idx: lbl for idx, lbl in zip(selected_indices, labels)}
+        cluster_map = {}
+        for idx, lbl in idx_to_label.items():
+            cluster_map.setdefault(int(lbl), []).append(int(idx))
+            
+        key_set = set()
 
-                    fm = np.stack(feats_kf, axis=0) if feats_kf else None
-                    if fm is None:
-                        continue
-
-                    labels_sub = _DBSCAN2(
-                        eps=float(kf_eps),
-                        min_samples=int(kf_min_samples),
-                        metric='cosine',
-                        n_jobs=-1,
-                    ).fit_predict(fm)
-
-                    uniq_sub = sorted(set(int(l) for l in labels_sub if l >= 0))
-                    map_sub = {old: new for new, old in enumerate(uniq_sub)}
-                    for i2, l2 in enumerate(labels_sub):
-                        if l2 >= 0:
-                            labels_sub[i2] = map_sub[int(l2)]
-
-                    selected_files: list[str] = []
-                    for sub in sorted({int(l) for l in labels_sub if l >= 0}):
-                        idxs_local = [i for i, l in enumerate(labels_sub) if int(l) == sub]
-                        chosen: list[int] = []
-                        for iidx in idxs_local:
-                            if not chosen:
-                                chosen.append(iidx)
-                                continue
-                            cos_dists = []
-                            hamm_fracs = []
-                            for j in chosen:
-                                f1 = fm[iidx] / (np.linalg.norm(fm[iidx]) + 1e-8)
-                                f2 = fm[j] / (np.linalg.norm(fm[j]) + 1e-8)
-                                cos_dists.append(1.0 - float(np.dot(f1, f2)))
-                                hamm_fracs.append(
-                                    (((phashes[iidx] ^ phashes[j]) & ((1 << 64) - 1)).bit_count()) / 64.0
-                                )
-                            min_cos = min(cos_dists) if cos_dists else 1.0
-                            min_hamm = min(hamm_fracs) if hamm_fracs else 1.0
-                            different = (min_cos >= kf_eps) or (min_hamm >= kf_hamming_frac)
-                            if kf_require_both:
-                                different = (min_cos >= kf_eps) and (min_hamm >= kf_hamming_frac)
-                            if different:
-                                chosen.append(iidx)
-                        selected_files.extend([files[s] for s in chosen])
-
-                    kdir = os.path.join(cdir, 'keyframes')
-                    os.makedirs(kdir, exist_ok=True)
-                    if not selected_files and files:
-                        selected_files = [files[0]]
-
-                    used_names: set[str] = set()
-                    for src in selected_files:
-                        base = os.path.basename(src)
-                        dst = os.path.join(kdir, base)
-                        suffix = 1
-                        while os.path.basename(dst) in used_names or os.path.exists(dst):
-                            stem, ext = os.path.splitext(base)
-                            dst = os.path.join(kdir, f'{stem}_{suffix}{ext}')
-                            suffix += 1
-                        used_names.add(os.path.basename(dst))
-                        try:
-                            shutil.copy2(src, dst)
-                        except Exception:
-                            pass
+        # Re-open video for reading (Random access required)
+        # To optimize, we read linearly and route frames to destinations
+        
+        if save_clusters or save_keyframes:
+            print("INFO: Saving results and extracting keyframes")
         else:
-            # Compute keyframes directly from the video for each cluster's frame indices
-            if 'labels' not in locals():
-                print('Keyframes requested without saved clusters, but labels are unavailable; skipping.')
-            else:
-                # Build label map from labels
-                label_map = {}
-                for idx_val, lbl in zip(selected_indices, labels):
-                    label_map.setdefault(int(lbl), []).append(int(idx_val))
-                cap3 = _cv.VideoCapture(video_file)
-                if cap3.isOpened():
-                    iterable_clusters, progress_clusters = _progress_iter(sorted(label_map.keys()), desc='Keyframes', unit='cluster')
-                    with progress_clusters:
-                        for cid in iterable_clusters:
-                            idxs = sorted(label_map[cid])
-                            feats_kf = []
-                            phashes = []
-                            iterable_idx, progress_idx = _progress_iter(idxs, desc=f'Feats {cid}', unit='frame')
-                            with progress_idx:
-                                for idx_val in iterable_idx:
-                                    cap3.set(_cv.CAP_PROP_POS_FRAMES, int(idx_val))
-                                    ret, frame = cap3.read()
-                                    if not ret:
-                                        continue
-                                    feats_kf.append(_feat_from_bgr(frame))
-                                    try:
-                                        from PIL import Image as _Image
-                                        im = _Image.fromarray(_cv.cvtColor(frame, _cv.COLOR_BGR2RGB))
-                                        phashes.append(_phash64_pil(im))
-                                    except Exception:
-                                        phashes.append(0)
-                            if not feats_kf:
-                                continue
-                            fm = np.stack(feats_kf, axis=0)
-                            labels_sub = _DBSCAN2(
-                                eps=float(kf_eps),
-                                min_samples=int(kf_min_samples),
-                                metric='cosine',
-                            ).fit_predict(fm)
-                            labels_sub = labels_sub.copy()
-                            uniq_sub = sorted(set(int(l) for l in labels_sub if l >= 0))
-                            map_sub = {old: new for new, old in enumerate(uniq_sub)}
-                            for i2, l2 in enumerate(labels_sub):
-                                if l2 >= 0:
-                                    labels_sub[i2] = map_sub[int(l2)]
-                            selected_idx = []
-                            for sub in sorted(set(int(l) for l in labels_sub if l >= 0)):
-                                idxs_local = [i for i, l in enumerate(labels_sub) if int(l) == sub]
-                                chosen = []
-                                for iidx in idxs_local:
-                                    if not chosen:
-                                        chosen.append(iidx)
-                                        continue
-                                    cos_dists = []
-                                    hamm_fracs = []
-                                    for j in chosen:
-                                        f1 = fm[iidx] / (np.linalg.norm(fm[iidx]) + 1e-8)
-                                        f2 = fm[j] / (np.linalg.norm(fm[j]) + 1e-8)
-                                        cos_dists.append(1.0 - float(np.dot(f1, f2)))
-                                        hamm_fracs.append(
-                                            (((phashes[iidx] ^ phashes[j]) & ((1 << 64) - 1)).bit_count()) / 64.0
-                                        )
-                                    min_cos = min(cos_dists) if cos_dists else 1.0
-                                    min_hamm = min(hamm_fracs) if hamm_fracs else 1.0
-                                    different = (min_cos >= kf_eps) or (min_hamm >= kf_hamming_frac)
-                                    if kf_require_both:
-                                        different = (min_cos >= kf_eps) and (min_hamm >= kf_hamming_frac)
-                                    if different:
-                                        chosen.append(iidx)
-                                selected_idx.extend([idxs[s] for s in chosen])
-                            cdir = os.path.join(out_dir, str(cid))
-                            os.makedirs(cdir, exist_ok=True)
-                            kdir = os.path.join(cdir, 'keyframes')
-                            os.makedirs(kdir, exist_ok=True)
-                            if not selected_idx and idxs:
-                                selected_idx = [idxs[0]]
-                            for idx_sel in selected_idx:
-                                cap3.set(_cv.CAP_PROP_POS_FRAMES, int(idx_sel))
-                                ret, frame = cap3.read()
-                                if not ret:
-                                    continue
-                                dst = os.path.join(kdir, f'{idx_sel:08d}.png')
-                                _cv.imwrite(dst, frame)
-                    cap3.release()
+            print("INFO: Selecting keyframes")
+        
+        # ThreadPool for writing images
+        max_w = int(workers) if (workers and int(workers) > 0) else 4
+        writer_pool = ThreadPoolExecutor(max_workers=max_w)
+        writer_futures = []
 
-        # Update JSON to include keyframe flags (only when labels exist)
-        try:
-            key_set = set()
-            # Collect keyframe names across clusters and map to frame indices
-            try:
-                cluster_dirs_present = [d for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d)) and d != 'keyframes']
-            except Exception:
-                cluster_dirs_present = []
-            for cname in cluster_dirs_present:
-                kdir = os.path.join(out_dir, cname, 'keyframes')
-                if not os.path.isdir(kdir):
-                    continue
-                for name in os.listdir(kdir):
-                    stem, ext = os.path.splitext(name)
-                    if stem.isdigit():
-                        key_set.add((int(cname) if cname.lstrip('-').isdigit() else cname, int(stem)))
-            if 'labels' in locals():
-                frames_entries2 = []
-                for idx_val, path_val, lbl in zip(selected_indices, selected_paths, labels):
-                    frames_entries2.append({
-                        'index': int(idx_val),
-                        'frame_index': int(idx_val),
-                        'path': path_val,
-                        'cluster_number': int(lbl),
-                        'keyframe': (int(lbl), int(idx_val)) in key_set,
-                    })
-                # Determine cluster count either from labels or current cluster directories
-                if 'clusters_count' not in locals():
-                    clusters_count_local = len(cluster_dirs_present)
-                else:
-                    clusters_count_local = clusters_count
-                with open(report_path, 'w', encoding='utf-8') as f:
-                    json.dump({'clusters': clusters_count_local, 'frames': frames_entries2}, f, ensure_ascii=False, indent=2)
-                frame_data = frames_entries2
-            debug_print("Cluster report updated with keyframe annotations", debug=debug)
-        except Exception as _e:
-            print(f'Failed to update keyframes in JSON: {_e}')
+        # We need another reader loop. 
+        # To avoid re-reading the whole file, we iterate ONLY the selected indices again.
+        # Smart Video Reader Logic Inline
+        cap = _cv.VideoCapture(video_file)
+        curr_pos = -1
+        
+        sorted_indices = sorted(selected_indices)
+        
+        # Batch accumulator for keyframe processing
+        # We process keyframes cluster-by-cluster usually, but we are reading frame-by-frame.
+        # Strategy: Accumulate frames in memory per cluster. 
+        # When a cluster is "complete" (all frames read), process keyframes.
+        # Problem: Large clusters = OOM.
+        # Fallback: Write all frames first (if save_clusters). Then read for keyframes?
+        # Better: Accumulate small batches per cluster and compute partials? No, DBSCAN needs all.
+        
+        # Hybrid Approach:
+        # 1. Read frame.
+        # 2. If save_clusters: submit write job.
+        # 3. If save_keyframes: Store features/phash for this frame in memory dict {cluster_id: [data]}. 
+        #    Wait, we need the image for pHash. Storing all images is OOM.
+        #    Optimization: Compute feature & pHash IMMEDIATELY upon read. Store tiny vector. Discard image.
+        
+        # Pre-compute features map to avoid re-inference
+        idx_to_feat = {idx: f for idx, f in zip(selected_indices, feats)}
+        
+        # Storage for Keyframe Logic: {cluster_id: {'idxs': [], 'feats': [], 'phashes': []}}
+        kf_data = {cid: {'idxs': [], 'feats': [], 'phashes': []} for cid in cluster_map}
 
-    # For now, just return the list of frame numbers to be processed
-    keyframes_only = [entry for entry in frame_data if entry.get("keyframe")]
+        pbar = _tqdm(total=len(sorted_indices), desc="Final Pass", unit="frame", colour="#888888") if debug else nullcontext()
+        
+        with pbar as pb:
+            for idx in sorted_indices:
+                # Seek/Grab
+                gap = idx - curr_pos - 1
+                if 0 < gap < SMART_SEEK_THRESHOLD:
+                    for _ in range(gap): cap.grab()
+                elif gap != 0:
+                    cap.set(_cv.CAP_PROP_POS_FRAMES, float(idx))
+                
+                ret, frame = cap.read()
+                curr_pos = idx
+                if not ret: break
+
+                lbl = idx_to_label.get(idx, 0)
+                
+                # 1. Save Cluster Image (Async)
+                if save_clusters:
+                    cdir = os.path.join(clusters_root, str(lbl))
+                    if not os.path.exists(cdir): os.makedirs(cdir, exist_ok=True)
+                    dst = os.path.join(cdir, f"{idx:08d}.png")
+                    
+                    # Copy frame to avoid thread race on buffer
+                    f_copy = frame.copy()
+                    
+                    # Clean finished futures
+                    if len(writer_futures) > max_w * 4:
+                        done, not_done = wait(writer_futures, return_when="FIRST_COMPLETED")
+                        writer_futures = list(not_done)
+                    writer_futures.append(writer_pool.submit(_cv.imwrite, dst, f_copy))
+
+                # 2. Keyframe Data Collection (Immediate Compute)
+                if keyframes:
+                    # pHash (Fast OpenCV version)
+                    # We pass a list of 1 for the batch function, overhead is minimal compared to I/O
+                    ph = _batch_phash64_cv2([frame])[0]
+                    
+                    kf_data[lbl]['idxs'].append(idx)
+                    kf_data[lbl]['phashes'].append(ph)
+                    kf_data[lbl]['feats'].append(idx_to_feat[idx]) # Reuse from Step 1
+
+                if pb: pb.update(1)
+
+        cap.release()
+        wait(writer_futures) # Finish writing
+        writer_pool.shutdown()
+
+        # --- Process Keyframes (Memory-Only, No Re-Read) ---
+        if keyframes:
+            from sklearn.cluster import DBSCAN as _DBSCAN2
+            
+            for cid, data in kf_data.items():
+                if not data['idxs']: continue
+                
+                idxs = data['idxs']
+                fm = np.stack(data['feats'])
+                phashes = data['phashes']
+                
+                # DBSCAN on subset
+                labels_sub = _DBSCAN2(
+                    eps=float(kf_eps), min_samples=int(kf_min_samples), metric='cosine', n_jobs=-1
+                ).fit_predict(fm)
+                
+                # Select Representative
+                selected_kf_indices = []
+                unique_subs = set(labels_sub)
+                if -1 in unique_subs: unique_subs.remove(-1)
+                
+                for sub in sorted(unique_subs):
+                    sub_indices = [i for i, x in enumerate(labels_sub) if x == sub]
+                    chosen = []
+                    
+                    for iidx in sub_indices:
+                        if not chosen:
+                            chosen.append(iidx); continue
+                        
+                        cos_dists = []
+                        hamm_fracs = []
+                        
+                        for j in chosen:
+                            f1 = fm[iidx] / (np.linalg.norm(fm[iidx]) + 1e-8)
+                            f2 = fm[j] / (np.linalg.norm(fm[j]) + 1e-8)
+                            cos_dists.append(1.0 - float(np.dot(f1, f2)))
+                            
+                            xor = (phashes[iidx] ^ phashes[j]) & ((1 << 64) - 1)
+                            hamm_fracs.append(bin(xor).count('1') / 64.0)
+                        
+                        min_cos = min(cos_dists) if cos_dists else 1.0
+                        min_hamm = min(hamm_fracs) if hamm_fracs else 1.0
+                        
+                        different = (min_cos >= kf_eps) or (min_hamm >= kf_hamming_frac)
+                        if kf_require_both:
+                            different = (min_cos >= kf_eps) and (min_hamm >= kf_hamming_frac)
+                        if different:
+                            chosen.append(iidx)
+                    
+                    for ch in chosen:
+                        selected_kf_indices.append(idxs[ch])
+                
+                # If nothing selected (noise only or empty), pick first
+                if not selected_kf_indices and idxs:
+                    selected_kf_indices.append(idxs[0])
+                    
+                # Mark in JSON and Copy Files
+                kdir = os.path.join(clusters_root, str(cid), 'keyframes')
+                if save_keyframes:
+                    os.makedirs(kdir, exist_ok=True)
+                
+                for kf_idx in selected_kf_indices:
+                    key_set.add((cid, kf_idx))
+                    
+                    if save_keyframes:
+                        # If we saved clusters, copy from there. Else we need to re-read.
+                        # Assumption: save_clusters is usually True if we want output. 
+                        # If save_clusters is False, we unfortunately have to re-read just these keyframes.
+                        # But usually saving keyframes implies having the images.
+                        
+                        if save_clusters:
+                            src = os.path.join(clusters_root, str(cid), f"{kf_idx:08d}.png")
+                            dst = os.path.join(kdir, f"{kf_idx:08d}.png")
+                            try:
+                                if os.path.exists(src):
+                                    shutil.copy2(src, dst)
+                            except: pass
+                        else:
+                            # Fallback: Read specific frame (rare case)
+                            try:
+                                # Re-open capture to fetch specific frame
+                                tmp_cap = _cv.VideoCapture(video_file)
+                                # Check if opened
+                                if tmp_cap.isOpened():
+                                    tmp_cap.set(_cv.CAP_PROP_POS_FRAMES, float(kf_idx))
+                                    ret, kf_img = tmp_cap.read()
+                                    if ret:
+                                        _cv.imwrite(dst, kf_img)
+                                    tmp_cap.release()
+                            except Exception as e:
+                                print(f"Warning: Failed to extract keyframe {kf_idx}: {e}") 
+
+        # Final JSON Update
+        frames_entries = []
+        for idx_val, path_val, lbl in zip(selected_indices, selected_paths, labels):
+            frames_entries.append({
+                "index": int(idx_val),
+                "frame_index": int(idx_val),
+                "path": path_val,
+                "cluster_number": int(lbl),
+                "keyframe": (int(lbl), int(idx_val)) in key_set
+            })
+
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump({"clusters": clusters_count, "frames": frames_entries}, f, ensure_ascii=False, indent=2)
+            
+        frame_data = frames_entries
+
+    # Final cleanup of return data
+    keyframes_only = [e for e in frame_data if e.get("keyframe")]
     if keyframes_only:
         frame_data = keyframes_only
     elif frame_data:
-        # Ensure bare entries carry only the index field when keyframes were unavailable
-        cleaned = []
+        clean = []
         seen = set()
-        for entry in frame_data:
-            idx_val = entry.get("index") or entry.get("frame_index")
-            try:
-                idx_int = int(idx_val)
-            except Exception:
-                continue
-            if idx_int in seen:
-                continue
-            seen.add(idx_int)
-            cleaned.append({"index": idx_int})
-        frame_data = cleaned
-    return output_folder, frame_data, report_path
+        for e in frame_data:
+            i = e.get('index', e.get('frame_index'))
+            if i is not None and i not in seen:
+                seen.add(i)
+                clean.append({'index': int(i)})
+        frame_data = clean
+
+    return clusters_root, frame_data, report_path

@@ -95,7 +95,7 @@ class ClusteringConfig(BaseModel):
         description="Save selected keyframes to disk as images.",
     )
     save_clusters: bool = Field(
-        default=False,
+        default=True,
         description="Save all cluster frames to disk (can be large).",
     )
 
@@ -182,7 +182,19 @@ class ObjectsConfig(BaseModel):
     )
     cluster_base_eps: float = Field(
         default=0.35,
-        description="Base DBSCAN epsilon for object/face clustering.",
+        description="Base DBSCAN epsilon for object clustering.",
+    )
+    face_cluster_base_eps: float = Field(
+        default=0.20,
+        description="Base DBSCAN epsilon for face clustering.",
+    )
+    cluster_dedup_threshold: float = Field(
+        default=0.95,
+        description="Cosine similarity threshold for near-duplicate pre-filtering before clustering. Crops above this similarity are collapsed.",
+    )
+    cluster_noise_max_distance: float = Field(
+        default=0.60,
+        description="Maximum cosine distance from nearest centroid before a crop is relegated to the noise folder.",
     )
     cluster_min_samples: int = Field(
         default=1,
@@ -460,3 +472,4 @@ def load_video_config(path: str) -> VideoConfig:
 
     payload = _normalize_video_payload(raw)
     return _parse_model(VideoConfig, payload)
+
