@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 
 __all__ = ["handle"]
 
+# Smart seeking constant - grab-forward instead of hard seek for small gaps
+_SMART_SEEK_THRESHOLD = 32
+
 
 # -----------------------------------------------------------------------------
 # Singleton cache for EasyOCR Reader to avoid reloading the model on each call
@@ -59,6 +62,7 @@ def _extract_text(
     save_images: bool = True,
     lang: str = 'en',
     debug: bool = False,
+    override_indices: Optional[List[int]] = None,
 ):
 
     print("INFO: Extracting OCR data from video")
@@ -91,7 +95,13 @@ def _extract_text(
 
     frames_metadata = frames_payload.get("frames", []) or []
     fps_arg = fps if (isinstance(fps, (int, float)) and fps > 0) else None
-    selected_indices = select_frame_indices(frames_metadata, fps_arg)
+
+    if override_indices:
+        # Use the explicitly provided frame indices (from main.py)
+        selected_indices = sorted(set(override_indices))
+    else:
+        selected_indices = select_frame_indices(frames_metadata, fps_arg)
+
     debug_print(f"Selected {len(selected_indices)} frames for OCR", debug=debug)
 
     if not selected_indices:
@@ -154,10 +164,21 @@ def _extract_text(
     iterable, progress_ctx = _progress_iter(selected_indices, desc="OCR", unit="frame")
 
     try:
+        current_pos = -1
         with progress_ctx:
             for frame_index in iterable:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, float(frame_index))
+                # Smart seeking: grab-forward for small gaps, hard seek for large
+                gap = frame_index - current_pos - 1
+                if gap == 0:
+                    pass
+                elif 0 < gap < _SMART_SEEK_THRESHOLD:
+                    for _ in range(gap):
+                        cap.grab()
+                else:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, float(frame_index))
+
                 ok, frame_img = cap.read()
+                current_pos = frame_index
                 if not ok or frame_img is None:
                     continue
 
@@ -337,6 +358,7 @@ def handle(
         save_images=save_images,
         lang=language,
         debug=debug,
+        override_indices=frame_indices,
     )
 
     if result_data:

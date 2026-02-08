@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import atexit
 import os
-import subprocess
 import sys
 import time
 from typing import List, Optional, Tuple
@@ -40,12 +39,12 @@ except Exception as e:
 
 # Start timer for total execution time measurement
 _start_time = time.perf_counter()
-_modules_executed = False  # Track if any modules were executed
+_modules_executed = [False]  # Track if any modules were executed
 
 
 def _print_elapsed_time():
     """Print total execution time on exit (only if modules were executed)."""
-    if not _modules_executed:
+    if not _modules_executed[0]:
         return
     try:
         elapsed = time.perf_counter() - _start_time
@@ -69,88 +68,6 @@ def _print_elapsed_time():
 atexit.register(_print_elapsed_time)
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-
-
-def _ensure_tf_keras_for_tf(debug: bool) -> None:
-    """Install tf-keras if TensorFlow >= 2.20 is present but tf-keras isn't."""
-
-    def get_version_dist(name: str) -> str | None:
-        try:
-            from importlib import metadata as importlib_metadata
-        except Exception:
-            try:
-                import importlib_metadata
-            except Exception:
-                importlib_metadata = None
-        if importlib_metadata:
-            try:
-                return importlib_metadata.version(name)
-            except Exception:
-                pass
-        try:
-            out = subprocess.run(
-                [sys.executable, "-m", "pip", "show", name],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if out.returncode == 0 and out.stdout:
-                for line in out.stdout.splitlines():
-                    if line.lower().startswith("version:"):
-                        return line.split(":", 1)[1].strip()
-        except Exception:
-            pass
-        return None
-
-    tf_ver = get_version_dist("tensorflow")
-    if not tf_ver:
-        return
-
-    try:
-        major, minor = [int(x) for x in tf_ver.split(".")[:2]]
-    except Exception:
-        return
-
-    if not (major > 2 or (major == 2 and minor >= 20)):
-        return
-
-    if get_version_dist("tf-keras") or get_version_dist("tf_keras"):
-        return
-
-    env = dict(os.environ)
-    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
-    base = [
-        sys.executable,
-        "-m",
-        "pip",
-        "--disable-pip-version-check",
-        "install",
-        "--no-cache-dir",
-        "--no-deps",
-        "-q",
-    ]
-    if debug:
-        try:
-            from modules.utils.logging import debug_print
-
-            debug_print("Installing required dependencies...", debug=True)
-        except Exception:
-            pass
-    subprocess.run(
-        base + ["tf-keras"],
-        check=False,
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if not (get_version_dist("tf-keras") or get_version_dist("tf_keras")):
-        subprocess.run(
-            base + ["tf_keras"],
-            check=False,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
 
 
 def _coerce_int(value) -> Optional[int]:
@@ -286,8 +203,7 @@ def main(
     configure_external_logging(debug)
 
     # Mark that we're executing modules (for execution time display)
-    global _modules_executed
-    _modules_executed = True
+    _modules_executed[0] = True
 
     # Frame selection state
     frame_indices_to_process: list[int] = []
@@ -439,7 +355,6 @@ def main(
 
     # Object detection
     if extract_objects:
-        _ensure_tf_keras_for_tf(debug)
         with gray_debug_output(debug):
             from modules import objects as objects_module
 

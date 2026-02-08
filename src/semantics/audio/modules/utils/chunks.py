@@ -10,6 +10,10 @@ CHUNK_LENGTH_SECONDS = 900
 _env = os.environ.copy()
 _env["AV_LOG_FORCE_NOCOLOR"] = "1"
 
+# Cache of previously-split chunk paths to avoid re-encoding the same file.
+# Key: (resolved input path, chunk_length)  →  Value: (chunk_paths, chunk_dir)
+_split_cache: dict[tuple[str, int], tuple[list[str], Path | None]] = {}
+
 
 @dataclass
 class AudioChunk:
@@ -46,13 +50,34 @@ def split_audio(
     chunk_name: str,
     chunk_length: int = CHUNK_LENGTH_SECONDS,
 ) -> Tuple[List[str], Optional[Path]]:
-    """Split an audio file into fixed-length chunks using ffmpeg."""
+    """Split an audio file into fixed-length chunks using ffmpeg.
+
+    Results are cached by (resolved input path, chunk_length) so that
+    multiple modules requesting the same split reuse the existing chunks.
+    """
     if chunk_length <= 0:
         return [audio_file], None
+
+    # Check the cache for previously-split chunks
+    resolved = str(Path(audio_file).resolve())
+    cache_key = (resolved, int(chunk_length))
+    if cache_key in _split_cache:
+        cached_paths, cached_dir = _split_cache[cache_key]
+        # Verify the chunk files still exist on disk
+        if cached_paths and all(Path(p).exists() for p in cached_paths):
+            return list(cached_paths), cached_dir
+        # Stale entry — remove it
+        _split_cache.pop(cache_key, None)
 
     base_dir = Path(temp_folder)
     chunk_dir = _ensure_chunk_dir(base_dir, chunk_name)
     pattern = str(chunk_dir / f"{chunk_name}_%05d.wav")
+
+    # Detect if input is already 16kHz mono WAV to skip re-encoding
+    is_wav = audio_file.lower().endswith(".wav")
+    codec_args = (
+        ["-c", "copy"] if is_wav else ["-ar", "16000", "-ac", "1"]
+    )
 
     command = [
         "ffmpeg",
@@ -67,10 +92,7 @@ def split_audio(
         "segment",
         "-segment_time",
         str(chunk_length),
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
+        *codec_args,
         pattern,
     ]
 
@@ -88,7 +110,9 @@ def split_audio(
         cleanup_chunks(chunk_dir)
         return [audio_file], None
 
-    return [str(path) for path in chunk_files], chunk_dir
+    result_paths = [str(path) for path in chunk_files]
+    _split_cache[cache_key] = (result_paths, chunk_dir)
+    return result_paths, chunk_dir
 
 
 def split_audio_with_overlap(

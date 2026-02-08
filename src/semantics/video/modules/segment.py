@@ -62,10 +62,6 @@ class SegmentArtifacts:
     frame_skip: int
 
 
-def segment_video_frames(video_path: str, *, config: Optional[SegmentConfig] = None) -> List[int]:
-    return segment_video(video_path, config=config).representative_indices
-
-
 def segment_video(video_path: str, *, config: Optional[SegmentConfig] = None) -> SegmentArtifacts:
     cfg = config or SegmentConfig()
 
@@ -258,31 +254,50 @@ def _distribute_frames(start: int, end: int, count: int) -> List[int]:
 def _export_frames(
     video_path: str,
     artifacts: SegmentArtifacts,
-    output_dir: Path,
+    output_dirs: List[Tuple[Path, bool]],
     *,
     image_format: str,
-    flat: bool,
 ) -> None:
+    """Export frames in a single video pass to multiple output directories.
+
+    Args:
+        video_path: Path to the video file.
+        artifacts: Segment artifacts with scene info.
+        output_dirs: List of (output_dir, flat) tuples. If flat=True, all
+            frames go into the directory directly; otherwise they are grouped
+            by scene sub-folders.
+        image_format: Image file extension (e.g. 'png').
+    """
     ext = image_format.lower().lstrip(".") or "png"
-    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build a mapping: frame_idx -> list of (target_dir, scene_id) for each output config
+    frame_targets: dict[int, list[tuple[Path, int]]] = {}
+    for scene in artifacts.scenes:
+        if not scene.representative_frames:
+            continue
+        for out_dir, flat in output_dirs:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            target_dir = out_dir if flat else out_dir / f"scene_{scene.scene_id:03d}"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            for frame_idx in scene.representative_frames:
+                frame_targets.setdefault(frame_idx, []).append((target_dir, scene.scene_id))
+
+    if not frame_targets:
+        return
 
     video = open_video(video_path)
     fps = artifacts.fps if artifacts.fps > 0.0 else getattr(video, "frame_rate", 30.0)
 
-    for scene in artifacts.scenes:
-        if not scene.representative_frames:
+    # Process all frames in sorted order (single video pass)
+    for frame_idx in sorted(frame_targets.keys()):
+        timecode = FrameTimecode(frame_idx, fps)
+        video.seek(timecode)
+        frame = video.read()
+        if frame is None:
             continue
-
-        target_dir = output_dir if flat else output_dir / f"scene_{scene.scene_id:03d}"
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-        for frame_idx in scene.representative_frames:
-            timecode = FrameTimecode(frame_idx, fps)
-            video.seek(timecode)
-            frame = video.read()
-            if frame is None:
-                continue
-            path = target_dir / f"frame_{frame_idx:08d}.{ext}"
+        filename = f"frame_{frame_idx:08d}.{ext}"
+        for target_dir, _ in frame_targets[frame_idx]:
+            path = target_dir / filename
             _cv.imwrite(str(path), frame)
 
 
@@ -417,8 +432,12 @@ def _extract(
 
     if save_frames:
         debug_print("INFO: Exporting keyframes to disk", debug=debug)
-        _export_frames(video_path, artifacts, scenes_dir, image_format="png", flat=False)
-        _export_frames(video_path, artifacts, flat_dir, image_format="png", flat=True)
+        _export_frames(
+            video_path,
+            artifacts,
+            [(scenes_dir, False), (flat_dir, True)],
+            image_format="png",
+        )
     else:
         debug_print("INFO: Skipping frame export (set save_frames=True to write images)", debug=debug)
 

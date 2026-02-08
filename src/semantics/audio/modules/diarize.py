@@ -13,7 +13,6 @@ import wave
 from typing import TYPE_CHECKING, List
 
 import wget
-from fastdtw import fastdtw  # type: ignore[import-untyped]
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from omegaconf import OmegaConf
 
@@ -21,6 +20,8 @@ from .utils.logging import debug_print, gray_debug_output
 
 if TYPE_CHECKING:
     from ..config import DiarizeConfig
+
+__all__ = ["handle"]
 
 
 def handle(
@@ -175,24 +176,6 @@ def _parse_rttm(rttm_file: str) -> List[dict]:
                     }
                 )
     return segments
-
-
-def match_speakers(transcript_segments: list, speaker_segments: list) -> list:
-    """Match speaker information with transcript segments using DTW."""
-    transcript_times = [seg["start"] for seg in transcript_segments]
-    speaker_times = [seg["start"] for seg in speaker_segments]
-
-    _, path = fastdtw(transcript_times, speaker_times, dist=lambda u, v: abs(u - v))
-
-    for idx_transcript, idx_speaker in path:
-        if idx_transcript < len(transcript_segments) and idx_speaker < len(
-            speaker_segments
-        ):
-            transcript_segments[idx_transcript]["speaker"] = speaker_segments[
-                idx_speaker
-            ]["speaker"]
-
-    return transcript_segments
 
 
 def _create_msdd_config(

@@ -129,13 +129,20 @@ def _ensure_yolo_classification_model(
     return model, device, use_half
 
 
+_SMART_SEEK_THRESHOLD = 32  # grab-forward instead of hard seek for small gaps
+
+
 def _iterate_selected_frames(
     video_path: str,
     indices: Sequence[int],
     *,
     debug: bool = False,
 ) -> Iterator[Tuple[int, np.ndarray]]:
-    """Iterate through specific frame indices in a video.
+    """Iterate through specific frame indices in a video using smart seeking.
+
+    Uses grab-forward for small gaps between consecutive frames and hard seek
+    for large jumps, avoiding the previous approach of reading every frame
+    sequentially from 0.
 
     Args:
         video_path: Path to the video file.
@@ -196,17 +203,26 @@ def _iterate_selected_frames(
         return
 
     try:
-        target_iter = iter(ordered)
-        try:
-            next_index = next(target_iter)
-        except StopIteration:
-            return
-
-        frame_idx = 0
+        current_pos = -1
         processed = 0
 
-        while True:
+        for target_idx in ordered:
+            # Smart seeking: decide between grab-forward and hard seek
+            gap = target_idx - current_pos - 1
+            if gap == 0:
+                # Already at the right position, just read
+                pass
+            elif 0 < gap < _SMART_SEEK_THRESHOLD:
+                # Small gap: grab-forward is cheaper than a hard seek
+                for _ in range(gap):
+                    cap.grab()
+            else:
+                # Large gap or backwards: do a hard seek
+                cap.set(cv2.CAP_PROP_POS_FRAMES, float(target_idx))
+
             ret, frame = cap.read()
+            current_pos = target_idx
+
             if not ret:
                 remaining = len(ordered) - processed
                 if remaining > 0 and debug:
@@ -219,16 +235,8 @@ def _iterate_selected_frames(
                     )
                 break
 
-            if frame_idx == next_index:
-                yield next_index, frame
-                processed += 1
-
-                try:
-                    next_index = next(target_iter)
-                except StopIteration:
-                    break
-
-            frame_idx += 1
+            yield target_idx, frame
+            processed += 1
     finally:
         cap.release()
 

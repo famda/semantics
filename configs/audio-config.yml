@@ -38,6 +38,12 @@ stem:
   chunk_length: 900
   # Which stem to extract (vocals, drums, bass, other)
   two_stems: vocals
+  # Random shifts for equivariant stabilization (0=disabled, 1=Demucs default)
+  # Higher values improve quality but multiply processing time proportionally
+  shifts: 0
+  # Overlap between processing segments (Demucs default 0.25)
+  # 0.1 is faster with minimal quality impact per official docs
+  overlap: 0.1
 
 # ----------------------------------------------------------------------------
 # Denoise Configuration

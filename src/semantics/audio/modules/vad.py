@@ -21,6 +21,8 @@ from .utils.logging import debug_print, gray_debug_output
 if TYPE_CHECKING:
     from config import VadConfig
 
+__all__ = ["handle"]
+
 
 @lru_cache(maxsize=1)
 def _load_vad_model():

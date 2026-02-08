@@ -214,7 +214,7 @@ class AsyncVideoReader:
         # Drain queue
         while not self.queue.empty():
             try: self.queue.get_nowait()
-            except: pass
+            except Exception: pass
 
 # =============================================================================
 # Cached Models
@@ -233,12 +233,12 @@ _YOLO_POSE_MODEL: Optional[YOLO] = None
 _YOLO_USE_HALF_PRECISION: bool = False
 
 class _NumpyEncoder(json.JSONEncoder):
-    def default(self, obj: Any):
-        if isinstance(obj, np.integer): return int(obj)
-        if isinstance(obj, np.floating): return float(obj)
-        if isinstance(obj, np.bool_): return bool(obj)
-        if isinstance(obj, np.ndarray): return obj.tolist()
-        return super().default(obj)
+    def default(self, o: Any):
+        if isinstance(o, np.integer): return int(o)
+        if isinstance(o, np.floating): return float(o)
+        if isinstance(o, np.bool_): return bool(o)
+        if isinstance(o, np.ndarray): return o.tolist()
+        return super().default(o)
 
 def _ensure_tensorflow(debug: bool) -> Optional[Any]:
     global _TF_MODULE
@@ -248,7 +248,7 @@ def _ensure_tensorflow(debug: bool) -> Optional[Any]:
         with gray_debug_output(debug):
             tf_module = importlib.import_module("tensorflow")
         try: tf_module.config.set_visible_devices([], "GPU")
-        except: pass
+        except Exception: pass
         _TF_MODULE = tf_module
         return _TF_MODULE
     except Exception: return None
@@ -331,7 +331,7 @@ def _extract_clip_features(
         try:
             with Image.open(p) as img:
                 return p, preprocess(img.convert("RGB"))
-        except: return p, None
+        except Exception: return p, None
 
     # Load and preprocess in parallel while GPU is busy
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -359,6 +359,7 @@ def _extract_clip_features(
     return feature_map
 
 # Helpers for pHash
+@lru_cache(maxsize=4)
 def _dct_matrix(n: int) -> np.ndarray:
     k = np.arange(n)[:, None]
     n_ = np.arange(n)[None, :]
@@ -415,7 +416,7 @@ def _cleanup_annotation_outputs(base_dir: str):
         if os.path.isdir(path): shutil.rmtree(path, ignore_errors=True)
         else:
             try: os.remove(path)
-            except: pass
+            except Exception: pass
     if not os.listdir(base_dir): shutil.rmtree(base_dir, ignore_errors=True)
 
 def _select_keyframes(
@@ -439,12 +440,15 @@ def _select_keyframes(
     feature_matrix = l2_normalize_rows(np.stack(feats, axis=0))
     try:
         labels = DBSCAN(eps=float(eps), min_samples=int(min_samples), metric="cosine", n_jobs=-1).fit_predict(feature_matrix)
-    except:
+    except Exception:
         labels = np.zeros(len(feats), dtype=int)
         
     # Parallel pHash using PIL logic to preserve precision
-    with ThreadPoolExecutor(max_workers=min(8, len(source_paths_valid))) as ex:
-        phashes = list(ex.map(_phash64_pil, source_paths_valid))
+    if len(source_paths_valid) > 1:
+        with ThreadPoolExecutor(max_workers=min(8, len(source_paths_valid))) as pool:
+            phashes = list(pool.map(_phash64_pil, source_paths_valid))
+    else:
+        phashes = [_phash64_pil(p) for p in source_paths_valid]
         
     selected = []
     unique_labels = sorted(set(labels))
@@ -463,10 +467,10 @@ def _select_keyframes(
             cos_dists = []
             hamm_dists = []
             
-            for ex in chosen:
-                f_ex = feature_matrix[ex]
+            for prev in chosen:
+                f_ex = feature_matrix[prev]
                 cos_dists.append(1.0 - float(np.dot(f_mem, f_ex)))
-                xor = (h_mem ^ phashes[ex]) & ((1 << 64) - 1)
+                xor = (h_mem ^ phashes[prev]) & ((1 << 64) - 1)
                 hamm_dists.append(bin(xor).count('1') / 64.0)
                 
             min_cos = min(cos_dists) if cos_dists else 1.0
@@ -484,19 +488,19 @@ def _determine_half_precision(device: torch.device) -> bool:
     try:
         major, _ = torch.cuda.get_device_capability(device)
         return major >= 6
-    except: return False
+    except Exception: return False
 
 def _prepare_yolo_model(model: YOLO, device: torch.device, *, use_half: bool, debug: bool) -> YOLO:
     try: model.to(device)
-    except: pass
+    except Exception: pass
     try: model.fuse()
-    except: pass
+    except Exception: pass
     if use_half:
         try: model.model.half()
-        except:
+        except Exception:
             use_half = False
             try: model.model.float()
-            except: pass
+            except Exception: pass
     return model
 
 def _ensure_yolo_models(debug: bool, require_segmentation: bool, require_pose: bool, detection_model_name: str, segmentation_model_name: str, pose_model_name: str):
@@ -547,6 +551,7 @@ def _cluster_class_directory(
     key_require_both: bool,
     cluster_min_attempts: int,
     clip_model_name: str,
+    precomputed_features: Optional[Dict[str, np.ndarray]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Cluster cropped object images using a two-passage approach.
 
@@ -570,24 +575,39 @@ def _cluster_class_directory(
     # extraction when available.  This forces CLIP to focus on the subject
     # rather than the shared background, dramatically improving accuracy
     # for small datasets.  Cluster folders still use the original crops.
-    seg_dir = os.path.join(image_folder, "_seg")
-    if os.path.isdir(seg_dir):
-        feature_source_paths: List[str] = []
-        for img_path in images:
-            seg_path = os.path.join(seg_dir, os.path.basename(img_path))
-            feature_source_paths.append(seg_path if os.path.isfile(seg_path) else img_path)
-        raw_feature_map = _extract_clip_features(
-            feature_source_paths, debug=debug, clip_model_name=clip_model_name,
-        )
-        # Remap keys: seg path -> original path so downstream uses originals
-        feature_map: Dict[str, np.ndarray] = {}
-        for img_path, src_path in zip(images, feature_source_paths):
-            if src_path in raw_feature_map:
-                feature_map[img_path] = raw_feature_map[src_path]
+    if precomputed_features:
+        # Use caller-supplied embeddings (e.g. Facenet512 for faces).
+        # Only include images that exist in the precomputed dict.
+        feature_map: Dict[str, np.ndarray] = {
+            p: precomputed_features[p]
+            for p in images
+            if p in precomputed_features
+        }
+        if debug:
+            debug_print(
+                f"[cluster:{class_name}] Using {len(feature_map)}/{len(images)} "
+                f"precomputed embeddings (skipping CLIP extraction)",
+                debug=debug,
+            )
     else:
-        feature_map = _extract_clip_features(
-            images, debug=debug, clip_model_name=clip_model_name,
-        )
+        seg_dir = os.path.join(image_folder, "_seg")
+        if os.path.isdir(seg_dir):
+            feature_source_paths: List[str] = []
+            for img_path in images:
+                seg_path = os.path.join(seg_dir, os.path.basename(img_path))
+                feature_source_paths.append(seg_path if os.path.isfile(seg_path) else img_path)
+            raw_feature_map = _extract_clip_features(
+                feature_source_paths, debug=debug, clip_model_name=clip_model_name,
+            )
+            # Remap keys: seg path -> original path so downstream uses originals
+            feature_map = {}
+            for img_path, src_path in zip(images, feature_source_paths):
+                if src_path in raw_feature_map:
+                    feature_map[img_path] = raw_feature_map[src_path]
+        else:
+            feature_map = _extract_clip_features(
+                images, debug=debug, clip_model_name=clip_model_name,
+            )
 
     ordered_paths = [p for p in images if p in feature_map]
     if len(ordered_paths) < min_samples:
@@ -795,7 +815,7 @@ def _save_segmentation_artifacts(writer: ThreadedImageWriter, frame_img, seg_det
             mask=np.asarray([mask.astype(bool)], dtype=bool),
             class_id=np.zeros(1, dtype=np.int32)
         )
-    except: pass
+    except Exception: pass
     
     contour_path = None
     if detection:
@@ -803,7 +823,7 @@ def _save_segmentation_artifacts(writer: ThreadedImageWriter, frame_img, seg_det
             contour_img = polygon_annotator.annotate(scene=frame_img.copy(), detections=detection)
             contour_path = os.path.join(mask_folder, f"{frame_number:08d}_{file_stem}_polygon.png")
             writer.write(contour_path, contour_img)
-        except: pass
+        except Exception: pass
         
     bg_path = os.path.join(mask_folder, f"{frame_number:08d}_{file_stem}_background.png")
     f_bgra = cv2.cvtColor(frame_img, cv2.COLOR_BGR2BGRA)
@@ -816,7 +836,7 @@ def _save_segmentation_artifacts(writer: ThreadedImageWriter, frame_img, seg_det
             ov = mask_annotator.annotate(scene=frame_img.copy(), detections=detection)
             overlay_path = os.path.join(mask_folder, f"{frame_number:08d}_{file_stem}_mask.png")
             writer.write(overlay_path, ov)
-        except: pass
+        except Exception: pass
         
     return {
         "image_path": mask_path,
@@ -909,7 +929,7 @@ def _detect(video_file, output_folder, classes_to_detect, frame_indices=None, de
     s_idx = []
     for i in frame_indices:
         try: s_idx.append(int(float(i)))
-        except: pass
+        except Exception: pass
     selected_indices = sorted(list(set(i for i in s_idx if i >= 0)))
     if not selected_indices: return output_folder, []
     
@@ -1072,7 +1092,6 @@ def _process_batch(frames, f_nums, v_file, fps, o_model, s_model, p_model, track
                 # pixels as neutral, and tight-crops to the foreground
                 # bounding-box so the subject fills the frame.
                 if perform_clustering:
-                    seg_match = None
                     if seg_dets is not None:
                         seg_match = _match_segmentation(
                             [x1, y1, x2, y2], seg_dets,
@@ -1112,7 +1131,7 @@ def _process_batch(frames, f_nums, v_file, fps, o_model, s_model, p_model, track
                     ann = box_ann.annotate(f_img.copy(), _d)
                     ann = lbl_ann.annotate(ann, _d, labels=[c_name])
                     writer.write(os.path.join(c_dir, f"{stem}_ann.png"), ann)
-                except: pass
+                except Exception: pass
                 
             seg_info = {}
             if save_ann and c_dir:
@@ -1159,10 +1178,10 @@ def _detect_faces(frame_number, output_folder, save_faces, frame_img, debug, set
         try:
             with gray_debug_output(debug):
                 raw = dp.extract_faces(det_img, detector_backend=settings.detector_backend, enforce_detection=False, align=True)
-        except:
+        except Exception:
             try:
                 raw = dp.extract_faces(det_img, detector_backend="opencv", enforce_detection=False, align=True)
-            except: pass
+            except Exception: pass
             
     faces = []
     if not raw: return faces
@@ -1197,7 +1216,7 @@ def _detect_faces(frame_number, output_folder, save_faces, frame_img, debug, set
                 with gray_debug_output(debug):
                     e = dp.represent(d.get("face"), model_name=settings.embedding_model_name, enforce_detection=False, detector_backend="skip", align=False)
                 if e and isinstance(e, list): emb = np.array(e[0]["embedding"], dtype=np.float32)
-            except: pass
+            except Exception: pass
             
         faces.append({
             "class_id": 100,
@@ -1214,6 +1233,25 @@ def _detect_faces(frame_number, output_folder, save_faces, frame_img, debug, set
 def _cluster_faces(all_faces, faces_dir, debug, settings):
     print(f"INFO: Clustering {len(all_faces)} faces")
     if not os.path.isdir(faces_dir): return None
+
+    # Build precomputed feature map from Facenet512 embeddings already
+    # extracted during detection.  This avoids re-reading face crops from
+    # disk and running CLIP inference, while also using a model that is
+    # specialised for face identity (much better than generic CLIP).
+    precomputed: Dict[str, np.ndarray] = {}
+    for face in all_faces:
+        emb = face.get("embedding")
+        path = face.get("image_path")
+        if emb is not None and path:
+            precomputed[path] = emb
+
+    if debug:
+        debug_print(
+            f"[cluster:faces] {len(precomputed)}/{len(all_faces)} faces have "
+            f"precomputed {all_faces[0].get('embedding_model', 'unknown')} embeddings",
+            debug=debug,
+        )
+
     summ = _cluster_class_directory(
         "faces", faces_dir, debug=debug,
         base_eps=settings.face_cluster_base_eps,
@@ -1223,6 +1261,7 @@ def _cluster_faces(all_faces, faces_dir, debug, settings):
         key_eps=settings.keyframe_eps, key_min_samples=settings.keyframe_min_samples,
         key_hamming_frac=settings.keyframe_hamming_frac, key_require_both=settings.keyframe_require_both,
         cluster_min_attempts=settings.cluster_min_attempts, clip_model_name=settings.clip_model_name,
+        precomputed_features=precomputed if precomputed else None,
     )
     if summ: summ["detected_faces"] = len(all_faces)
     return summ

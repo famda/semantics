@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 
 _ENV = os.environ.copy()
 _ENV["AV_LOG_FORCE_NOCOLOR"] = "1"
+
+__all__ = ["handle"]
 _GRAY = Fore.LIGHTBLACK_EX
 
 init()
@@ -142,6 +144,8 @@ def handle(
     chunk_length = config.chunk_length if config else 900
     model = config.model if config else "htdemucs_ft"
     two_stems = config.two_stems if config else "vocals"
+    shifts = config.shifts if config else 0
+    overlap = config.overlap if config else 0.1
 
     print("INFO: Performing source separation")
 
@@ -199,6 +203,8 @@ def handle(
                 "audio", "-m", "demucs.separate", "-n", model,
                 f"--two-stems={two_stems}", str(input_path),
                 "-o", str(output_root), "--device", device,
+                "--shifts", str(shifts),
+                "--overlap", str(overlap),
             ]
             htdemucs_root = output_root / model
             if htdemucs_root.exists():

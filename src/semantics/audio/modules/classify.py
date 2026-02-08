@@ -25,6 +25,8 @@ from .utils.logging import debug_print, gray_debug_output
 if TYPE_CHECKING:
     from ..config import ClassifyConfig
 
+__all__ = ["handle"]
+
 try:
     from transformers import AutoFeatureExtractor, AutoModelForAudioClassification
     import librosa
@@ -123,37 +125,6 @@ def handle(
     )
     top_n = config.top_n if config else defaults["top_n"]
 
-    return classify(
-        input_file,
-        output_folder,
-        chunk_length=chunk_length,
-        model_id=model_id,
-        expected_sample_rate=expected_sample_rate,
-        top_n=top_n,
-        debug=debug,
-    )
-
-
-def classify(
-    audio_file,
-    output_folder,
-    chunk_length: int | None = None,
-    *,
-    model_id: str | None = None,
-    expected_sample_rate: int | None = None,
-    top_n: int | None = None,
-    debug: bool = False,
-):
-    """Legacy wrapper for audio classification.
-
-    Use :func:`handle` for new code.
-    """
-    defaults = _get_classify_defaults()
-    chunk_length = chunk_length if chunk_length is not None else defaults["chunk_length"]
-    model_id = model_id if model_id is not None else defaults["model_id"]
-    expected_sample_rate = expected_sample_rate if expected_sample_rate is not None else defaults["expected_sample_rate"]
-    top_n = top_n if top_n is not None else defaults["top_n"]
-
     _info("INFO: Performing classification")
 
     base_temp_folder = output_folder
@@ -178,7 +149,7 @@ def classify(
         return None
 
     chunks, chunk_dir = split_audio(
-        audio_file, base_temp_folder, "classify", chunk_length
+        input_file, base_temp_folder, "classify", chunk_length
     )
 
     aggregated_probabilities = None

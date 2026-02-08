@@ -54,6 +54,14 @@ class StemConfig(BaseModel):
     two_stems: str = Field(
         default="vocals", description="Stem type to extract (vocals, drums, etc.)"
     )
+    shifts: int = Field(
+        default=0,
+        description="Random shifts for equivariant stabilization (0=off, 1=default Demucs, higher=slower but better)",
+    )
+    overlap: float = Field(
+        default=0.1,
+        description="Overlap between processing segments (Demucs default 0.25, 0.1 is faster with minimal quality loss)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +248,10 @@ class CtcConfig(BaseModel):
     min_speaker_overlap_seconds: float = Field(
         default=0.0, description="Minimum overlap required to assign speaker to segment"
     )
+    device: Optional[str] = Field(
+        default=None,
+        description="Device for CTC model: 'cuda', 'cpu', or None for auto-detect",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -274,12 +286,12 @@ class TimelineConfig(BaseModel):
     device: Optional[str] = Field(
         default=None, description="Device override (cuda/cpu/None=auto)"
     )
-    batch_size: int = Field(default=8, description="Batch size for inference")
+    batch_size: int = Field(default=32, description="Batch size for inference")
     window_size: float = Field(
         default=2.0, description="Analysis window size in seconds"
     )
     hop_size: float = Field(
-        default=1.0, description="Hop between analysis windows in seconds"
+        default=2.0, description="Hop between analysis windows in seconds"
     )
     target_sample_rate: int = Field(
         default=16000, description="Target sample rate for analysis"

@@ -28,7 +28,12 @@ from typing import (
 import librosa
 import numpy as np
 import torch
+
+__all__ = ["handle"]
 from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForSequenceClassification
+
+# Module-level model cache: model_name -> (model, processor, labels)
+_EMOTION_MODEL_CACHE: dict[str, tuple] = {}
 
 from .utils.logging import debug_print, gray_debug_output
 
@@ -91,6 +96,17 @@ class _EmotionAnalyzer:
             debug=debug,
         )
 
+        # Check module-level cache first
+        if model_name in _EMOTION_MODEL_CACHE:
+            cached_model, cached_processor, cached_labels = _EMOTION_MODEL_CACHE[model_name]
+            self.model = cached_model
+            self.processor = cached_processor
+            self.model.to(torch.device(self.device))  # type: ignore[arg-type]
+            self.model.eval()
+            self.labels = cached_labels
+            debug_print(f"Emotion model '{model_name}' loaded from cache", debug=debug)
+            return
+
         with gray_debug_output(debug):
             self.model = Wav2Vec2ForSequenceClassification.from_pretrained(model_name)
             self.processor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
@@ -120,6 +136,9 @@ class _EmotionAnalyzer:
                 "sad",
                 "surprised",
             ]
+
+        # Store in cache for subsequent calls
+        _EMOTION_MODEL_CACHE[model_name] = (self.model, self.processor, self.labels)
 
     def _post_process(self, prob_matrix: np.ndarray) -> np.ndarray:
         """Apply smoothing and confidence shaping to raw probabilities."""

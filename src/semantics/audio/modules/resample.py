@@ -20,6 +20,8 @@ env = os.environ.copy()
 env["AV_LOG_FORCE_NOCOLOR"] = "1"
 GRAY = Fore.LIGHTBLACK_EX
 
+__all__ = ["handle", "enhance"]
+
 init()
 
 
@@ -99,7 +101,7 @@ def handle(
         "-loglevel",
         "info" if debug else "error",
         "-nostdin",
-        "-threads", "96",
+        "-threads", str(os.cpu_count() or 4),
         "-y",
         "-i", input_file,
         "-ac", str(channels),
@@ -152,7 +154,7 @@ def enhance(
         "-hide_banner",
         "-loglevel",
         "info" if debug else "error",
-        "-threads", "96",
+        "-threads", str(os.cpu_count() or 4),
         "-y",
         "-i", input_file,
         "-af", "afftdn,highpass=f=200,compand,acompressor,loudnorm,equalizer=f=300:t=q:w=2:g=3,equalizer=f=3000:t=q:w=2:g=3",

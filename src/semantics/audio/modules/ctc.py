@@ -24,6 +24,8 @@ import torch
 from nemo.collections.asr.models import EncDecCTCModel
 from .utils.logging import debug_print, gray_debug_output
 
+__all__ = ["handle"]
+
 if TYPE_CHECKING:
     from ..config import CtcConfig
 
@@ -773,6 +775,12 @@ def handle(
     ctc_dir.mkdir(parents=True, exist_ok=True)
     output_path = ctc_dir / "alignment.json"
 
+    # Auto-detect device: use CUDA when available unless overridden
+    import torch as _torch
+    device = config.device if config and config.device else None
+    if device is None:
+        device = "cuda" if _torch.cuda.is_available() else "cpu"
+
     try:
         _align_transcript(
             audio_path=audio_path,
@@ -781,6 +789,7 @@ def handle(
             segment_margin=segment_margin,
             segment_backoffs=segment_backoffs,
             min_overlap=min_overlap,
+            device=device,
             debug=debug,
         )
         LOGGER.info("Alignment written to %s", output_path)

@@ -21,8 +21,10 @@ from .utils.logging import debug_print, gray_debug_output
 if TYPE_CHECKING:
     from config import DenoiseConfig
 
+__all__ = ["handle"]
+
 # Module-level state for auto-scale feature detection
-_AUTO_SCALE_AVAILABLE: bool = True
+_auto_scale_available: list[bool] = [True]  # use list to avoid global mutation
 _FFMPEG_ENV = os.environ.copy()
 _FFMPEG_ENV["AV_LOG_FORCE_NOCOLOR"] = "1"
 
@@ -52,8 +54,6 @@ def handle(
     Returns:
         Path to the denoised audio file.
     """
-    global _AUTO_SCALE_AVAILABLE
-
     # Extract config values (use defaults if config is None)
     chunk_length = config.chunk_length if config else 900
     allow_auto_scale = config.allow_auto_scale if config else True
@@ -76,8 +76,7 @@ def handle(
 
     def run_denoiser(src: str, dst: str) -> None:
         """Run denoiser with auto-scale fallback."""
-        global _AUTO_SCALE_AVAILABLE
-        use_auto_scale = allow_auto_scale and _AUTO_SCALE_AVAILABLE
+        use_auto_scale = allow_auto_scale and _auto_scale_available[0]
 
         debug_print(f"Invoking AudioDenoiser with auto_scale={use_auto_scale}", debug=debug)
         try:
@@ -86,7 +85,7 @@ def handle(
         except RuntimeError as exc:
             if use_auto_scale and "quantile" in str(exc).lower():
                 print("WARN: Auto-scale failed due to large tensor in torch.quantile; retrying without auto scaling.")
-                _AUTO_SCALE_AVAILABLE = False
+                _auto_scale_available[0] = False
                 debug_print("Retrying AudioDenoiser with auto_scale=False", debug=debug)
                 with gray_debug_output(debug):
                     denoiser.process_audio_file(src, dst, auto_scale=False)

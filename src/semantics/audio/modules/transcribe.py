@@ -26,6 +26,8 @@ if TYPE_CHECKING:
 # Module-level model cache for reuse across multiple calls
 _MODEL_CACHE: dict[tuple[str, str, str], WhisperModel] = {}
 
+__all__ = ["handle"]
+
 
 def handle(
     input_file: str,

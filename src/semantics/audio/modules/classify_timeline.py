@@ -19,6 +19,7 @@ from scipy.signal import find_peaks
 from scipy.ndimage import median_filter
 
 from .utils.logging import debug_print, gray_debug_output
+from .vad import _load_vad_model as _shared_load_vad_model
 
 if TYPE_CHECKING:
     from ..config import TimelineConfig
@@ -26,7 +27,11 @@ if TYPE_CHECKING:
 warnings.filterwarnings("ignore")
 transformers_logging.set_verbosity_error()
 
-__all__ = ["handle", "classify_timeline"]
+__all__ = ["handle"]
+
+# Module-level model caches to avoid reloading across calls
+_EMOTION_MODEL_CACHE: Optional[Tuple] = None  # (model, processor, labels, device)
+_AST_MODEL_CACHE: Optional[Tuple] = None  # (model, processor, device)
 
 
 class _AudioClassifier:
@@ -125,6 +130,46 @@ class _AudioClassifier:
         }
         self.speech_categories = {"speech"}
 
+        # Pre-compute AST label → category mapping for fast event detection
+        self._precompute_category_indices()
+
+    def _precompute_category_indices(self) -> None:
+        """Build a lookup from each audio category to its matching AST label indices.
+
+        This is done once at init and eliminates millions of repeated string
+        comparisons during ``_detect_audio_events``.  For each category we
+        store a tuple ``(np_indices, label_names)`` where ``np_indices`` is a
+        ``numpy`` int array suitable for fancy-indexing into the probability
+        vector.
+        """
+        self._category_np_indices: Dict[str, Tuple[np.ndarray, List[str]]] = {}
+
+        if getattr(self, "audio_model", None) is None:
+            return
+
+        id2label = self.audio_model.config.id2label  # {int: str, ...}
+
+        for category, keywords in self.audio_category_keywords.items():
+            keywords_lower = [kw.lower() for kw in keywords]
+            matching_indices: List[int] = []
+            matching_labels: List[str] = []
+
+            for idx, label in id2label.items():
+                label_lower = label.lower()
+                if any(kw in label_lower for kw in keywords_lower):
+                    matching_indices.append(int(idx))
+                    matching_labels.append(label)
+
+            if matching_indices:
+                self._category_np_indices[category] = (
+                    np.array(matching_indices, dtype=np.intp),
+                    matching_labels,
+                )
+
+        self._debug(
+            f"DEBUG: Pre-computed category indices for {len(self._category_np_indices)} categories"
+        )
+
     def _debug(self, message: str) -> None:
         debug_print(message, debug=self.debug)
 
@@ -132,7 +177,14 @@ class _AudioClassifier:
         return gray_debug_output(self.debug)
 
     def _load_emotion_model(self):
-        """Load emotion recognition model."""
+        """Load emotion recognition model (cached across instances)."""
+        global _EMOTION_MODEL_CACHE
+        if _EMOTION_MODEL_CACHE is not None:
+            self.emotion_model, self.emotion_processor, self.emotion_labels, _ = _EMOTION_MODEL_CACHE
+            self.emotion_model.to(torch.device(self.device))
+            self._debug("DEBUG: Emotion model loaded (from cache)")
+            return
+
         try:
             model_name = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
             with self._gray_context():
@@ -144,6 +196,8 @@ class _AudioClassifier:
                 )
                 self.emotion_model.to(torch.device(self.device))  # type: ignore[arg-type]
             self.emotion_model.eval()
+            if self.device == "cuda":
+                self.emotion_model.half()  # float16 for faster Tensor Core inference
 
             config_labels = getattr(self.emotion_model.config, "id2label", None)
             if isinstance(config_labels, dict) and config_labels:
@@ -172,13 +226,21 @@ class _AudioClassifier:
                     "sad",
                     "surprised",
                 ]
+            _EMOTION_MODEL_CACHE = (self.emotion_model, self.emotion_processor, self.emotion_labels, self.device)
             self._debug("DEBUG: Emotion model loaded")
         except Exception as e:
             print(f"WARN: Could not load emotion model: {e}")
             self.emotion_model = None
 
     def _load_audio_tagging_model(self):
-        """Load general audio classification model for music, speech, laughter, etc."""
+        """Load general audio classification model (cached across instances)."""
+        global _AST_MODEL_CACHE
+        if _AST_MODEL_CACHE is not None:
+            self.audio_model, self.audio_processor, _ = _AST_MODEL_CACHE
+            self.audio_model.to(self.device)
+            self._debug("DEBUG: Audio tagging model loaded (from cache)")
+            return
+
         try:
             model_name = "MIT/ast-finetuned-audioset-10-10-0.4593"
             with self._gray_context():
@@ -188,28 +250,23 @@ class _AudioClassifier:
                 self.audio_processor = ASTFeatureExtractor.from_pretrained(model_name)
                 self.audio_model.to(self.device)
             self.audio_model.eval()
+            if self.device == "cuda":
+                self.audio_model.half()  # float16 for faster Tensor Core inference
+            _AST_MODEL_CACHE = (self.audio_model, self.audio_processor, self.device)
             self._debug("DEBUG: Audio tagging model loaded")
         except Exception as e:
             print(f"WARN: Could not load audio tagging model: {e}")
             self.audio_model = None
 
     def _load_vad_model(self):
-        """Load Voice Activity Detection model for better speech segmentation."""
+        """Load Voice Activity Detection model (reuses cached model from vad module)."""
         try:
-            # Silero VAD - lightweight and accurate
             with self._gray_context():
-                vad_result = torch.hub.load(
-                    repo_or_dir="snakers4/silero-vad",
-                    model="silero_vad",
-                    force_reload=False,
-                    onnx=False,
-                )
-                # torch.hub.load returns (model, utils) tuple for silero-vad
-                self.vad_model = vad_result[0]  # type: ignore[index]
-                vad_utils = vad_result[1]  # type: ignore[index]
+                vad_model, vad_utils = _shared_load_vad_model()
+                self.vad_model = vad_model
                 self.vad_model.to(self.device)
             self.get_speech_timestamps = vad_utils[0]
-            self._debug("DEBUG: VAD model loaded")
+            self._debug("DEBUG: VAD model loaded (shared cache)")
         except Exception as e:
             print(f"WARN: Could not load VAD model: {e}")
             self.vad_model = None
@@ -381,11 +438,12 @@ class _AudioClassifier:
                     return_tensors="pt",
                     padding=True,
                 )
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                _dtype = next(self.emotion_model.parameters()).dtype
+                inputs = {k: v.to(device=self.device, dtype=_dtype) for k, v in inputs.items()}
 
                 # Get predictions
                 with torch.no_grad():
-                    logits = self.emotion_model(**inputs).logits  # type: ignore[union-attr]
+                    logits = self.emotion_model(**inputs).logits.float()  # type: ignore[union-attr]
                     if self.emotion_temperature and self.emotion_temperature != 1.0:
                         logits = logits / self.emotion_temperature
                     probs = torch.nn.functional.softmax(logits, dim=-1)
@@ -443,60 +501,57 @@ class _AudioClassifier:
             return [None] * len(audio_windows)
 
     def _detect_audio_events(self, audio_windows: List[np.ndarray]) -> List[List[Dict]]:
-        """Detect various audio events (batch processing)."""
-        if self.audio_model is None:
+        """Detect various audio events (batch processing).
+
+        Uses pre-computed ``_category_np_indices`` to avoid per-window string
+        matching.  Probability extraction is done via numpy fancy-indexing
+        across the entire batch for each category.
+        """
+        if self.audio_model is None or not self._category_np_indices:
             return [[] for _ in audio_windows]
 
         try:
-            all_results = []
+            all_results: List[List[Dict]] = []
 
             for i in range(0, len(audio_windows), self.batch_size):
                 batch = audio_windows[i : i + self.batch_size]
+                batch_size = len(batch)
 
-                # Process batch
+                # Process batch through AST model
                 inputs = self.audio_processor(
                     batch, sampling_rate=self.target_sr, return_tensors="pt"
                 )
-                inputs = {k: v.to(self.device) for k, v in inputs.items()}
+                _dtype = next(self.audio_model.parameters()).dtype
+                inputs = {k: v.to(device=self.device, dtype=_dtype) for k, v in inputs.items()}
 
-                # Get predictions
                 with torch.no_grad():
-                    logits = self.audio_model(**inputs).logits
+                    logits = self.audio_model(**inputs).logits.float()
                     probs = torch.nn.functional.softmax(logits, dim=-1)
 
-                probs = probs.cpu().numpy()
+                probs = probs.cpu().numpy()  # shape: (batch_size, num_labels)
 
-                # Get labels
-                id2label = self.audio_model.config.id2label
+                # Initialize per-window event lists
+                batch_events: List[List[Dict]] = [[] for _ in range(batch_size)]
 
-                # Process each result in batch
-                for j in range(len(batch)):
-                    prob = probs[j]
-                    events = []
+                # Vectorized per-category detection across entire batch
+                for category, (indices, labels) in self._category_np_indices.items():
+                    # Fancy-index: extract columns for matching labels
+                    cat_probs = probs[:, indices]  # (batch_size, n_matching)
+                    max_local_idx = np.argmax(cat_probs, axis=1)  # (batch_size,)
+                    max_prob = np.max(cat_probs, axis=1)  # (batch_size,)
 
-                    # Check each category
-                    for category, keywords in self.audio_category_keywords.items():
-                        max_prob = 0
-                        matched_label = None
+                    # Only create dicts for windows that exceed the threshold
+                    above = max_prob > self.audio_event_threshold
+                    for j in np.nonzero(above)[0]:
+                        batch_events[int(j)].append(
+                            {
+                                "category": category,
+                                "label": labels[int(max_local_idx[j])],
+                                "confidence": float(max_prob[j]),
+                            }
+                        )
 
-                        for idx, label in id2label.items():
-                            if any(
-                                keyword.lower() in label.lower() for keyword in keywords
-                            ):
-                                if prob[idx] > max_prob:
-                                    max_prob = prob[idx]
-                                    matched_label = label
-
-                        if max_prob > self.audio_event_threshold:
-                            events.append(
-                                {
-                                    "category": category,
-                                    "label": matched_label,
-                                    "confidence": float(max_prob),
-                                }
-                            )
-
-                    all_results.append(events)
+                all_results.extend(batch_events)
 
             return all_results
 
@@ -648,52 +703,12 @@ class _AudioClassifier:
 
         return merged
 
-    def _remove_overlapping_conflicts(
-        self, segments_by_type: Dict[str, List[Dict]]
-    ) -> Dict[str, List[Dict]]:
-        """Remove conflicting overlapping segments, keeping higher confidence ones."""
-        # Flatten all segments with their type
-        all_segments = []
-        for seg_type, segs in segments_by_type.items():
-            for seg in segs:
-                seg_copy = seg.copy()
-                seg_copy["_type"] = seg_type
-                all_segments.append(seg_copy)
+    def analyze(self, audio_path: str) -> Tuple[Dict, np.ndarray, int]:
+        """Analyze audio file and return timeline of events.
 
-        # Sort by confidence (descending)
-        all_segments.sort(key=lambda x: x.get("confidence", 0), reverse=True)
-
-        # Keep non-overlapping segments
-        kept_segments = []
-
-        for seg in all_segments:
-            overlaps = False
-            for kept in kept_segments:
-                # Check for significant overlap
-                overlap_start = max(seg["start"], kept["start"])
-                overlap_end = min(seg["end"], kept["end"])
-                overlap_duration = max(0, overlap_end - overlap_start)
-
-                seg_duration = seg["end"] - seg["start"]
-
-                # If more than 50% overlaps, consider it conflicting
-                if overlap_duration > seg_duration * 0.5:
-                    overlaps = True
-                    break
-
-            if not overlaps:
-                kept_segments.append(seg)
-
-        # Reorganize by type
-        result = defaultdict(list)
-        for seg in kept_segments:
-            seg_type = seg.pop("_type")
-            result[seg_type].append(seg)
-
-        return dict(result)
-
-    def analyze(self, audio_path: str) -> Dict:
-        """Analyze audio file and return timeline of events."""
+        Returns:
+            Tuple of (results_dict, audio_waveform, sample_rate).
+        """
         # Load audio
         audio, sr = self.load_audio(audio_path)
 
@@ -796,7 +811,7 @@ class _AudioClassifier:
             },
         }
 
-        return results
+        return results, audio, sr
 
     def export_to_json(self, results: Dict, output_path: Union[str, Path]):
         """Export results to JSON file."""
@@ -816,23 +831,29 @@ def _assign_ids_and_export_segments(
     *,
     energy_window: float = 1.0,
     debug: bool = False,
+    preloaded_audio: Optional[np.ndarray] = None,
+    preloaded_sr: Optional[int] = None,
 ) -> None:
     """Assign IDs to timeline entries and export corresponding audio snippets."""
 
     classification_path.mkdir(parents=True, exist_ok=True)
     audio_path = Path(audio_path)
 
-    if not audio_path.exists():
-        print(f"Warning: Audio file for segment export not found: {audio_path}")
-        return
+    if preloaded_audio is not None and preloaded_sr is not None:
+        audio = preloaded_audio
+        sr = preloaded_sr
+    else:
+        if not audio_path.exists():
+            print(f"Warning: Audio file for segment export not found: {audio_path}")
+            return
 
-    sr = int(results.get("sample_rate", 16000))
-    try:
-        with gray_debug_output(debug):
-            audio, sr = librosa.load(str(audio_path), sr=sr, mono=True)
-    except Exception as exc:
-        print(f"WARN: Failed to load audio for segment export: {exc}")
-        return
+        sr = int(results.get("sample_rate", 16000))
+        try:
+            with gray_debug_output(debug):
+                audio, sr = librosa.load(str(audio_path), sr=sr, mono=True)
+        except Exception as exc:
+            print(f"WARN: Failed to load audio for segment export: {exc}")
+            return
 
     total_samples = len(audio)
     duration = float(results.get("duration", total_samples / sr))
@@ -898,9 +919,9 @@ def _run_timeline_classification(
     classification_dir: Union[str, Path],
     *,
     device: Optional[str] = None,
-    batch_size: int = 8,
+    batch_size: int = 32,
     window_size: float = 2.0,
-    hop_size: float = 1.0,
+    hop_size: float = 2.0,
     target_sample_rate: int = 16000,
     emotion_threshold: float = 0.12,
     audio_event_threshold: float = 0.35,
@@ -949,7 +970,7 @@ def _run_timeline_classification(
         vad_min_silence_duration_ms=vad_min_silence_duration_ms,
         debug=debug,
     )
-    results = classifier.analyze(str(audio_path))
+    results, audio_waveform, audio_sr = classifier.analyze(str(audio_path))
 
     classification_path = Path(classification_dir)
     classification_path.mkdir(parents=True, exist_ok=True)
@@ -961,68 +982,12 @@ def _run_timeline_classification(
         classification_path,
         energy_window=energy_window,
         debug=debug,
+        preloaded_audio=audio_waveform,
+        preloaded_sr=audio_sr,
     )
     classifier.export_to_json(results, output_path)
 
     return {"results": results, "output_path": str(output_path)}
-
-
-def classify_timeline(
-    audio_path: Union[str, Path],
-    working_dir: Union[str, Path],
-    *,
-    device: Optional[str] = None,
-    batch_size: int = 8,
-    window_size: float = 2.0,
-    hop_size: float = 1.0,
-    target_sample_rate: int = 16000,
-    emotion_threshold: float = 0.12,
-    audio_event_threshold: float = 0.35,
-    min_segment_duration: float = 0.5,
-    emotion_temperature: float = 0.7,
-    emotion_prob_smoothing: int = 5,
-    emotion_confidence_gamma: float = 1.35,
-    min_speech_overlap_ratio: float = 0.15,
-    vad_threshold: float = 0.5,
-    vad_min_speech_duration_ms: int = 250,
-    vad_min_silence_duration_ms: int = 100,
-    energy_window: float = 1.0,
-    output_filename: str = "timeline_classification.json",
-    debug: bool = False,
-) -> Dict:
-    """Entry point used by ``main.py`` to run audio timeline classification."""
-
-    audio_path = Path(audio_path)
-    if not audio_path.is_file():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
-
-    working_dir = Path(working_dir)
-    classification_dir = working_dir / "classification"
-
-    result = _run_timeline_classification(
-        audio_path=audio_path,
-        classification_dir=classification_dir,
-        device=device,
-        batch_size=batch_size,
-        window_size=window_size,
-        hop_size=hop_size,
-        target_sample_rate=target_sample_rate,
-        emotion_threshold=emotion_threshold,
-        audio_event_threshold=audio_event_threshold,
-        min_segment_duration=min_segment_duration,
-        emotion_temperature=emotion_temperature,
-        emotion_prob_smoothing=emotion_prob_smoothing,
-        emotion_confidence_gamma=emotion_confidence_gamma,
-        min_speech_overlap_ratio=min_speech_overlap_ratio,
-        vad_threshold=vad_threshold,
-        vad_min_speech_duration_ms=vad_min_speech_duration_ms,
-        vad_min_silence_duration_ms=vad_min_silence_duration_ms,
-        energy_window=energy_window,
-        output_filename=output_filename,
-        debug=debug,
-    )
-
-    return result
 
 
 def handle(
@@ -1045,13 +1010,20 @@ def handle(
     Returns:
         Dictionary with classification results including emotion and audio event timelines.
     """
-    return classify_timeline(
-        input_file,
-        output_folder,
+    audio_path = Path(input_file)
+    if not audio_path.is_file():
+        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+    working_dir = Path(output_folder)
+    classification_dir = working_dir / "classification"
+
+    result = _run_timeline_classification(
+        audio_path=audio_path,
+        classification_dir=classification_dir,
         device=config.device if config else None,
-        batch_size=config.batch_size if config else 8,
+        batch_size=config.batch_size if config else 32,
         window_size=config.window_size if config else 2.0,
-        hop_size=config.hop_size if config else 1.0,
+        hop_size=config.hop_size if config else 2.0,
         target_sample_rate=config.target_sample_rate if config else 16000,
         emotion_threshold=config.emotion_threshold if config else 0.12,
         audio_event_threshold=config.audio_event_threshold if config else 0.35,
@@ -1068,3 +1040,5 @@ def handle(
         energy_window=config.energy_window if config else 1.0,
         debug=debug,
     )
+
+    return result
