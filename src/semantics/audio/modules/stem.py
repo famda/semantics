@@ -22,6 +22,7 @@ from scipy.ndimage import uniform_filter1d
 from colorama import Fore, Style, init
 
 from .utils.chunks import cleanup_chunks, concatenate_audio, split_audio
+from .utils.logging import info_print, update_sub_progress
 
 if TYPE_CHECKING:
     from ..config import StemConfig
@@ -147,7 +148,7 @@ def handle(
     shifts = config.shifts if config else 0
     overlap = config.overlap if config else 0.1
 
-    print("INFO: Performing source separation")
+    info_print("Performing source separation")
 
     temp_path = Path(output_folder)
     temp_path.mkdir(parents=True, exist_ok=True)
@@ -257,7 +258,7 @@ def handle(
         if music_path.exists(): ensure_mono_16k(music_path)
         
         # 2. Detect Segments
-        print("INFO: Analyzing stems for start/end timestamps")
+        info_print("Analyzing stems for start/end timestamps")
         segments = []
         
         # Detect Vocals (Sensitivity: Medium)
@@ -305,14 +306,15 @@ def handle(
             return input_file
 
         # Case B: Chunking needed
-        print(f"INFO: Chunking stems into {len(chunks)} segments...")
+        info_print(f"Chunking stems into {len(chunks)} segments...")
         if stem_dir.exists(): shutil.rmtree(stem_dir)
         stem_dir.mkdir(parents=True, exist_ok=True)
         stem_chunks: Dict[str, List[str]] = {}
 
         for index, chunk_path_str in enumerate(chunks):
+            update_sub_progress(index, len(chunks), "chunks")
             chunk_path = Path(chunk_path_str)
-            print(f"INFO: Processing stem chunk {index + 1}/{len(chunks)}")
+            info_print(f"Processing stem chunk {index + 1}/{len(chunks)}")
             with tempfile.TemporaryDirectory(dir=output_folder) as demucs_temp:
                 demucs_output = run_demucs(chunk_path, Path(demucs_temp))
                 if not demucs_output: raise RuntimeError("Demucs failed on chunk")

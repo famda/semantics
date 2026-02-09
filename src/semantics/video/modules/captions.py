@@ -12,7 +12,7 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print, update_sub_progress
 import torch
 
 if TYPE_CHECKING:
@@ -91,11 +91,11 @@ def _extract_captions(
         print("ERROR: No frame indices provided for caption generation")
         return [], output_folder
 
-    print(f"INFO: Extracting captions for {len(normalized_indices)} frame(s)")
+    info_print(f"Extracting captions for {len(normalized_indices)} frame(s)")
     debug_print(f"Frame indices: {normalized_indices}", debug=debug)
 
     if os.path.isdir(output_folder):
-        print("INFO: Cleaning existing captions folder")
+        info_print("Cleaning existing captions folder")
         try:
             shutil.rmtree(output_folder)
         except Exception as e:
@@ -129,6 +129,7 @@ def _extract_captions(
         pbar = nullcontext()
 
     try:
+        processed = 0
         with pbar as pb:
             # Chunk indices into batches
             for i in range(0, total_frames_count, BATCH_SIZE):
@@ -188,6 +189,8 @@ def _extract_captions(
                 
                 if debug:
                     pb.update(len(valid_batch_indices))
+                processed += len(valid_batch_indices)
+                update_sub_progress(processed, total_frames_count, "frames")
 
     finally:
         cap.release()
@@ -215,19 +218,57 @@ class Florence2Analyzer:
         else:
             self.dtype = getattr(torch, "bfloat16", torch.float32)
 
+        # Patch transformers PretrainedConfig AND PreTrainedModel to tolerate
+        # missing attributes in Florence2 remote code (transformers>=5.x regression).
+        from transformers.configuration_utils import PretrainedConfig as _PC
+        from transformers.modeling_utils import PreTrainedModel as _PM
+
+        _orig_cfg_getattr = _PC.__getattribute__
+        _orig_mdl_getattr = _PM.__getattribute__
+        _SAFE_CFG = frozenset(("forced_bos_token_id", "forced_eos_token_id"))
+        _SAFE_MDL = frozenset((
+            "_supports_sdpa", "_supports_flash_attn_2",
+            "_supports_flex_attn", "_supports_cache_class",
+        ))
+
+        def _lenient_cfg_getattr(self, key):
+            try:
+                return _orig_cfg_getattr(self, key)
+            except AttributeError:
+                if key in _SAFE_CFG:
+                    return None
+                raise
+
+        def _lenient_mdl_getattr(self, key):
+            try:
+                return _orig_mdl_getattr(self, key)
+            except AttributeError:
+                if key in _SAFE_MDL:
+                    return False
+                raise
+
+        # Patch torch.linspace to produce CPU tensors so DaViT.__init__
+        # can call .item() (meta-device tensors from transformers 5.x fail).
+        _orig_linspace = torch.linspace
+        def _cpu_linspace(*args, **kwargs):
+            if "device" not in kwargs:
+                kwargs["device"] = "cpu"
+            return _orig_linspace(*args, **kwargs)
+
+        _PC.__getattribute__ = _lenient_cfg_getattr
+        _PM.__getattribute__ = _lenient_mdl_getattr
+        torch.linspace = _cpu_linspace
+
         try:
             self.model = AutoModelForCausalLM.from_pretrained(
                 model_id,
                 trust_remote_code=True,
-                attn_implementation="eager",
                 dtype=self.dtype,
             ).to(self.device)
-        except TypeError:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_id,
-                trust_remote_code=True,
-                torch_dtype=self.dtype,
-            ).to(self.device)
+        finally:
+            _PC.__getattribute__ = _orig_cfg_getattr
+            _PM.__getattribute__ = _orig_mdl_getattr
+            torch.linspace = _orig_linspace
 
         try:
             self.model.eval()
@@ -236,7 +277,42 @@ class Florence2Analyzer:
         except Exception:
             pass
 
-        self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        # Florence2 processor accesses tokenizer.additional_special_tokens
+        # which is missing in transformers 5.x; patch the tokenizer base class.
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase as _TB
+        _orig_tok_getattr = _TB.__getattr__
+
+        def _lenient_tok_getattr(self, key):
+            if key == "additional_special_tokens":
+                return getattr(self, "_additional_special_tokens", [])
+            return _orig_tok_getattr(self, key)
+
+        _TB.__getattr__ = _lenient_tok_getattr
+        try:
+            # NOTE: ``use_fast=False`` was previously passed here to avoid a
+            # CLIPImageProcessor regression in transformers 5.x, but it also
+            # forces the slow BartTokenizer which requires a ``merges.txt``
+            # file that Florence-2 does not ship.  Omitting it allows the
+            # fast tokenizer (BartTokenizerFast) to load from tokenizer.json.
+            self.processor = AutoProcessor.from_pretrained(
+                model_id, trust_remote_code=True,
+            )
+        finally:
+            _TB.__getattr__ = _orig_tok_getattr
+
+        # Ensure processor tokenizer retains special tokens (transformers 5.x
+        # converts to TokenizersBackend during add_special_tokens, losing them).
+        ptok = getattr(self.processor, "tokenizer", None)
+        if ptok is not None:
+            if ptok.pad_token is None:
+                ptok.pad_token = "<pad>"
+            if ptok.eos_token is None:
+                ptok.eos_token = "</s>"
+            if ptok.bos_token is None:
+                ptok.bos_token = "<s>"
+            if ptok.unk_token is None:
+                ptok.unk_token = "<unk>"
+
         self.default_queries = "person. car. dog. cat. bicycle. chair. book. phone. text."
 
         # Configure generation settings once
@@ -296,8 +372,10 @@ class Florence2Analyzer:
         
         # Suppress warnings/fix config
         if hasattr(gen_cfg, "early_stopping"): gen_cfg.early_stopping = False
-        if gc.forced_bos_token_id is not None: gen_cfg.forced_bos_token_id = gc.forced_bos_token_id
-        if gc.forced_eos_token_id is not None: gen_cfg.forced_eos_token_id = gc.forced_eos_token_id
+        _forced_bos = getattr(gc, "forced_bos_token_id", None)
+        if _forced_bos is not None: gen_cfg.forced_bos_token_id = _forced_bos
+        _forced_eos = getattr(gc, "forced_eos_token_id", None)
+        if _forced_eos is not None: gen_cfg.forced_eos_token_id = _forced_eos
         
         # Batch Generate
         with torch.inference_mode():

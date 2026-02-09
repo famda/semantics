@@ -150,9 +150,9 @@ objects:
   # Options: "retinaface", "mtcnn", "opencv", "ssd", "dlib"
   detector_backend: "retinaface"
 
-  # OpenAI CLIP model for object embedding and similarity
-  # Options: "ViT-B/32", "ViT-B/16", "ViT-L/14", etc.
-  clip_model_name: "ViT-B/32"
+  # HuggingFace CLIP model for object embedding and similarity
+  # Options: "openai/clip-vit-base-patch32", "openai/clip-vit-base-patch16", "openai/clip-vit-large-patch14", etc.
+  clip_model_name: "openai/clip-vit-base-patch32"
 
   # Base DBSCAN epsilon for object clustering
   cluster_base_eps: 0.35

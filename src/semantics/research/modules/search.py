@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 from ddgs import DDGS
 from ddgs.exceptions import DDGSException, TimeoutException
 
+from .utils.logging import info_print
+
 
 _LOGGER = logging.getLogger(__name__)
 _SAFESEARCH_LEVEL = "moderate"
@@ -118,7 +120,7 @@ def search_content(
 		logging.basicConfig(level=logging.DEBUG)
 
 	normalized_query = query.strip()
-	print(f"INFO: Searching for {normalized_query}")
+	info_print(f"Searching for {normalized_query}")
 	query_terms = _tokenize(normalized_query)
 
 	if debug:

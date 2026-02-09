@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 
 from colorama import Fore, Style, init
 
+from .utils.logging import info_print
+
 if TYPE_CHECKING:
     from config import ResampleConfig, EnhanceConfig
 
@@ -81,7 +83,7 @@ def handle(
     Returns:
         Path to the resampled audio file.
     """
-    print("INFO: Converting and resampling the audio file")
+    info_print("Converting and resampling the audio file")
 
     # Use config values or defaults
     sample_rate = config.sample_rate if config else 16000
@@ -146,7 +148,7 @@ def enhance(
     Returns:
         Path to the enhanced audio file (or original on failure).
     """
-    print("INFO: Enhancing the audio quality")
+    info_print("Enhancing the audio quality")
 
     output_file = os.path.join(output_folder, "enhanced.wav")
     ffmpeg_command = [

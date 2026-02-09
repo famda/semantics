@@ -35,7 +35,7 @@ from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForSequenceClassifica
 # Module-level model cache: model_name -> (model, processor, labels)
 _EMOTION_MODEL_CACHE: dict[str, tuple] = {}
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print
 
 if TYPE_CHECKING:
     from ..config import EmotionConfig
@@ -340,7 +340,7 @@ def handle(
     Returns:
         Emotion analysis results or None if no segments available.
     """
-    print("INFO: Performing emotion analysis")
+    info_print("Performing emotion analysis")
 
     # Extract config values with defaults
     model_name = (

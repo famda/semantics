@@ -17,13 +17,17 @@ from sentence_transformers import CrossEncoder, SentenceTransformer, util
 if TYPE_CHECKING:
     from ..config import CandidatesConfig as PydanticCandidatesConfig
 
+from .utils.logging import info_print
+
+logger = logging.getLogger(__name__)
+
 # --- 0. Setup NLTK for sentence splitting ---
 for _resource in ("punkt", "punkt_tab"):
     try:
         nltk.data.find(f"tokenizers/{_resource}")
     except LookupError:
-        print(f"NLTK '{_resource}' tokenizer not found. Downloading...")
-        nltk.download(_resource)
+        logger.debug("NLTK '%s' tokenizer not found. Downloading...", _resource)
+        nltk.download(_resource, quiet=True)
 
 # --- Configuration Class ---
 @dataclass
@@ -83,7 +87,7 @@ def load_models(config: RetrievalConfig):
     retriever_source = local_override or retriever_model_id
 
     if config.verbose:
-        print(f"Loading retriever model ({retriever_model_id})...")
+        logger.debug("Loading retriever model (%s)...", retriever_model_id)
     try:
         retriever = SentenceTransformer(
             retriever_source,
@@ -106,13 +110,13 @@ def load_models(config: RetrievalConfig):
             ) from download_exc
 
     if config.verbose:
-        print("Retriever model loaded.")
+        logger.debug("Retriever model loaded.")
     
     if config.verbose:
-        print(f"Loading reranker model ({config.reranker_model})...")
+        logger.debug("Loading reranker model (%s)...", config.reranker_model)
     reranker = CrossEncoder(config.reranker_model)
     if config.verbose:
-        print("Reranker model loaded.")
+        logger.debug("Reranker model loaded.")
     
     return retriever, reranker
 
@@ -122,17 +126,17 @@ def load_data(json_file_path: str) -> List[Dict[str, Any]]:
         with open(json_file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
             if not isinstance(data, list):
-                print(f"Error: Expected a list in {json_file_path}, got {type(data)}")
+                logger.warning("Expected a list in %s, got %s", json_file_path, type(data))
                 return []
             return data
     except FileNotFoundError:
-        print(f"Error: File not found: {json_file_path}")
+        logger.warning("File not found: %s", json_file_path)
         return []
     except json.JSONDecodeError as e:
-        print(f"Error: Invalid JSON in {json_file_path}: {e}")
+        logger.warning("Invalid JSON in %s: %s", json_file_path, e)
         return []
     except Exception as e:
-        print(f"Error loading {json_file_path}: {e}")
+        logger.warning("Error loading %s: %s", json_file_path, e)
         return []
 
 # --- 2. Improved Chunking Function ---
@@ -146,20 +150,20 @@ def create_corpus_chunks(items_list: List[Dict[str, Any]], config: RetrievalConf
         tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
         use_tokenizer = True
     except Exception as e:
-        print(f"Warning: Could not load tokenizer ({e}). Falling back to sentence-based chunking.")
+        logger.debug("Could not load tokenizer (%s). Falling back to sentence-based chunking.", e)
         use_tokenizer = False
     
     if not items_list:
-        print("Warning: Empty items list provided for chunking.")
+        logger.debug("Empty items list provided for chunking.")
         return []
     
     if config.verbose:
-        print(f"Creating chunks from {len(items_list)} items...")
+        logger.debug("Creating chunks from %d items...", len(items_list))
     chunk_database = []
     
     for i, item in enumerate(items_list):
         if not isinstance(item, dict):
-            print(f"Warning: Item at index {i} is not a dictionary. Skipping.")
+            logger.debug("Item at index %d is not a dictionary. Skipping.", i)
             continue
             
         title = item.get('title', '')
@@ -167,13 +171,13 @@ def create_corpus_chunks(items_list: List[Dict[str, Any]], config: RetrievalConf
         
         if not text or not text.strip():
             if config.verbose:
-                print(f"Warning: Item at index {i} has no text. Skipping.")
+                logger.debug("Item at index %d has no text. Skipping.", i)
             continue
         
         try:
             sentences = nltk.sent_tokenize(text)
         except Exception as e:
-            print(f"Error tokenizing text for item {i}: {e}")
+            logger.debug("Error tokenizing text for item %d: %s", i, e)
             continue
         
         if not sentences:
@@ -188,7 +192,7 @@ def create_corpus_chunks(items_list: List[Dict[str, Any]], config: RetrievalConf
                 try:
                     sentence_tokens = len(tokenizer.encode(sentence, add_special_tokens=False))
                 except Exception as e:
-                    print(f"Warning: Error encoding sentence: {e}. Skipping sentence.")
+                    logger.debug("Error encoding sentence: %s. Skipping.", e)
                     continue
                 
                 # If adding this sentence exceeds max tokens and we have content, save chunk
@@ -245,7 +249,7 @@ def create_corpus_chunks(items_list: List[Dict[str, Any]], config: RetrievalConf
                     break
     
     if config.verbose:
-        print(f"Created {len(chunk_database)} chunks.")
+        logger.debug("Created %d chunks.", len(chunk_database))
     return chunk_database
 
 # --- 3. Embedding Function ---
@@ -257,11 +261,11 @@ def create_chunk_embeddings(
 ) -> torch.Tensor:
     """Creates embeddings for all text chunks."""
     if not chunk_database:
-        print("Error: Empty chunk database provided.")
+        logger.debug("Empty chunk database provided.")
         return None
     
     if verbose:
-        print(f"Computing embeddings for {len(chunk_database)} chunks...")
+        logger.debug("Computing embeddings for %d chunks...", len(chunk_database))
     start_time = time.time()
     
     try:
@@ -279,10 +283,10 @@ def create_chunk_embeddings(
         
         end_time = time.time()
         if verbose:
-            print(f"Embeddings computed in {end_time - start_time:.2f} seconds.")
+            logger.debug("Embeddings computed in %.2f seconds.", end_time - start_time)
         return corpus_embeddings
     except Exception as e:
-        print(f"Error creating embeddings: {e}")
+        logger.warning("Error creating embeddings: %s", e)
         return None
 
 # --- 4. Aggregation Strategy ---
@@ -328,7 +332,7 @@ def aggregate_chunk_scores(chunk_scores: List[float], method: str = 'max') -> fl
         return sum(s * w for s, w in zip(chunk_scores, weights)) / total_weight
     
     else:
-        print(f"Warning: Unknown aggregation method '{method}'. Using 'max'.")
+        logger.debug("Unknown aggregation method '%s'. Using 'max'.", method)
         return max(chunk_scores)
 
 # --- 5. Ranking Function with All Improvements ---
@@ -349,30 +353,28 @@ def rank_items(
     
     # === INPUT VALIDATION ===
     if not query or not query.strip():
-        print("Error: Empty query provided.")
+        logger.debug("Empty query provided.")
         return []
     
     if not original_items:
-        print("Error: No items provided.")
+        logger.debug("No items provided.")
         return []
     
     if not chunk_database:
-        print("Error: No chunks available.")
+        logger.debug("No chunks available.")
         return []
     
     if corpus_embeddings is None:
-        print("Error: Corpus embeddings are not available.")
+        logger.debug("Corpus embeddings are not available.")
         return []
     
     if len(corpus_embeddings) != len(chunk_database):
-        print(f"Error: Embedding count ({len(corpus_embeddings)}) doesn't match chunk count ({len(chunk_database)})")
+        logger.warning("Embedding count (%d) doesn't match chunk count (%d)", len(corpus_embeddings), len(chunk_database))
         return []
     
     query = query.strip()
     if config.verbose:
-        print(f"\n{'='*60}")
-        print(f"SEARCHING FOR: '{query}'")
-        print(f"{'='*60}")
+        logger.debug("SEARCHING FOR: '%s'", query)
     
     # === STAGE 1: RETRIEVAL (Bi-Encoder) ===
     retrieval_k = min(config.retrieval_k, len(chunk_database))
@@ -394,14 +396,15 @@ def rank_items(
             })
         
         if config.verbose:
-            print(f"\n[STAGE 1: RETRIEVAL]")
-            print(f"  Retrieved {len(retrieved_hits)} candidate chunks")
+            logger.debug("[STAGE 1: RETRIEVAL] Retrieved %d candidate chunks", len(retrieved_hits))
             unique_items = len(set(chunk_database[h['chunk_index']]['parent_item_index'] for h in retrieved_hits))
-            print(f"  Representing {unique_items} unique items")
-            print(f"  Retrieval score range: [{min(h['retrieval_score'] for h in retrieved_hits):.3f}, {max(h['retrieval_score'] for h in retrieved_hits):.3f}]")
+            logger.debug("  Representing %d unique items", unique_items)
+            logger.debug("  Retrieval score range: [%.3f, %.3f]",
+                         min(h['retrieval_score'] for h in retrieved_hits),
+                         max(h['retrieval_score'] for h in retrieved_hits))
     
     except Exception as e:
-        print(f"Error during retrieval stage: {e}")
+        logger.warning("Error during retrieval stage: %s", e)
         return []
     
     # === STAGE 2: RERANKING (Cross-Encoder) ===
@@ -417,8 +420,8 @@ def rank_items(
         batch_size = config.rerank_batch_size
         
         if config.verbose:
-            print(f"\n[STAGE 2: RERANKING]")
-            print(f"  Processing {len(rerank_input)} pairs in batches of {batch_size}")
+            logger.debug("[STAGE 2: RERANKING] Processing %d pairs in batches of %d",
+                         len(rerank_input), batch_size)
         
         for i in range(0, len(rerank_input), batch_size):
             batch = rerank_input[i:i + batch_size]
@@ -434,18 +437,19 @@ def rank_items(
         
         if config.verbose:
             rerank_scores_list = [h['rerank_score'] for h in retrieved_hits]
-            print(f"  Rerank score range: [{min(rerank_scores_list):.3f}, {max(rerank_scores_list):.3f}]")
-            print(f"  Mean rerank score: {sum(rerank_scores_list)/len(rerank_scores_list):.3f}")
+            logger.debug("  Rerank score range: [%.3f, %.3f]",
+                         min(rerank_scores_list), max(rerank_scores_list))
+            logger.debug("  Mean rerank score: %.3f",
+                         sum(rerank_scores_list) / len(rerank_scores_list))
     
     except Exception as e:
-        print(f"Error during reranking stage: {e}")
+        logger.warning("Error during reranking stage: %s", e)
         return []
     
     # === STAGE 3: AGGREGATION ===
     try:
         if config.verbose:
-            print(f"\n[STAGE 3: AGGREGATION]")
-            print(f"  Aggregation method: {config.aggregation_method}")
+            logger.debug("[STAGE 3: AGGREGATION] method=%s", config.aggregation_method)
         
         # Group chunks by parent item
         item_chunk_scores = {}
@@ -474,10 +478,10 @@ def rank_items(
             )
         
         if config.verbose:
-            print(f"  Aggregated scores for {len(final_item_scores)} unique items")
+            logger.debug("  Aggregated scores for %d unique items", len(final_item_scores))
         
     except Exception as e:
-        print(f"Error during aggregation stage: {e}")
+        logger.warning("Error during aggregation stage: %s", e)
         return []
     
     # === STAGE 4: FILTERING & RANKING ===
@@ -494,11 +498,11 @@ def rank_items(
         best_score = final_item_scores[sorted_item_indices[0]] if sorted_item_indices else float('-inf')
         
         if config.verbose:
-            print(f"\n[STAGE 4: FILTERING & RANKING]")
-            print(f"  Best score: {best_score:.3f}")
-            print(f"  Min score threshold: {config.min_score_threshold}")
+            logger.debug("[STAGE 4: FILTERING & RANKING]")
+            logger.debug("  Best score: %.3f", best_score)
+            logger.debug("  Min score threshold: %s", config.min_score_threshold)
             if config.score_margin_threshold:
-                print(f"  Score margin threshold: {config.score_margin_threshold}")
+                logger.debug("  Score margin threshold: %s", config.score_margin_threshold)
         
         for item_index in sorted_item_indices:
             score = final_item_scores[item_index]
@@ -506,7 +510,7 @@ def rank_items(
             # Filter by absolute threshold
             if score < config.min_score_threshold:
                 if config.verbose:
-                    print(f"  Filtered out item {item_index} (score {score:.3f} below threshold)")
+                    logger.debug("  Filtered out item %d (score %.3f below threshold)", item_index, score)
                 continue
             
             # Filter by margin from best score
@@ -514,7 +518,7 @@ def rank_items(
                 score_diff = best_score - score
                 if score_diff > config.score_margin_threshold:
                     if config.verbose:
-                        print(f"  Filtered out item {item_index} (score {score:.3f}, {score_diff:.3f} below best)")
+                        logger.debug("  Filtered out item %d (score %.3f, %.3f below best)", item_index, score, score_diff)
                     continue
             
             filtered_items.append(item_index)
@@ -523,17 +527,15 @@ def rank_items(
         final_items = filtered_items[:final_top_k]
         
         if config.verbose:
-            print(f"  Returned top {len(final_items)} items (requested: {final_top_k})")
+            logger.debug("  Returned top %d items (requested: %d)", len(final_items), final_top_k)
         
     except Exception as e:
-        print(f"Error during filtering stage: {e}")
+        logger.warning("Error during filtering stage: %s", e)
         return []
     
     # === FINAL RESULTS ===
     if config.verbose:
-        print(f"\n{'='*60}")
-        print(f"TOP {len(final_items)} RESULTS")
-        print(f"{'='*60}")
+        logger.debug("TOP %d RESULTS", len(final_items))
     
     ranked_list = []
     for rank, item_index in enumerate(final_items, 1):
@@ -544,16 +546,15 @@ def rank_items(
             chunk_scores = item_chunk_scores[item_index]
 
             if config.verbose:
-                print(f"\n{rank}. [{best_score:.3f}] {original_item.get('title', 'Untitled')}")
-                print(f"   Item Index: {item_index}")
-                print(f"   Chunks: {num_chunks} | Scores: {[f'{s:.2f}' for s in sorted(chunk_scores, reverse=True)[:3]]}")
+                logger.debug("%d. [%.3f] %s", rank, best_score, original_item.get('title', 'Untitled'))
+                logger.debug("   Item Index: %d", item_index)
+                logger.debug("   Chunks: %d | Top scores: %s", num_chunks,
+                             [f'{s:.2f}' for s in sorted(chunk_scores, reverse=True)[:3]])
 
-                # Show a preview of the text
                 text_preview = original_item.get('text', '')[:200]
                 if len(original_item.get('text', '')) > 200:
                     text_preview += "..."
-                print(f"   Preview: {text_preview}")
-                print(f"   {'-'*56}")
+                logger.debug("   Preview: %s", text_preview)
 
             ranked_list.append({
                 "rank": rank,
@@ -565,7 +566,7 @@ def rank_items(
             })
 
         except Exception as e:
-            print(f"Warning: Error processing item at index {item_index}: {e}")
+            logger.debug("Error processing item at index %d: %s", item_index, e)
             continue
     
     return ranked_list
@@ -582,12 +583,12 @@ def select_candidates_from_search_results(
     """Run the retrieval pipeline against a search payload and return ranked candidates."""
 
     if not query or not query.strip():
-        print("Error: Empty query provided for candidate selection.")
+        logger.debug("Empty query provided for candidate selection.")
         return []
 
     config = config or RetrievalConfig()
 
-    print("INFO: Selecting best candidates")
+    info_print("Selecting best candidates")
 
     if isinstance(search_payload, dict):
         raw_results = search_payload.get("results", [])
@@ -595,17 +596,17 @@ def select_candidates_from_search_results(
         raw_results = search_payload
 
     if not raw_results:
-        print("No search results provided for candidate selection.")
+        logger.debug("No search results provided for candidate selection.")
         return []
 
     if config.verbose:
-        print(f"Preparing {len(raw_results)} search results for candidate selection...")
+        logger.debug("Preparing %d search results for candidate selection...", len(raw_results))
 
     normalized_items: List[Dict[str, Any]] = []
     for idx, result in enumerate(raw_results):
         if not isinstance(result, dict):
             if config.verbose:
-                print(f"Warning: Search result at index {idx} is not a dictionary. Skipping.")
+                logger.debug("Search result at index %d is not a dictionary. Skipping.", idx)
             continue
 
         title_raw = result.get("title") or result.get("url") or f"Result {idx + 1}"
@@ -636,7 +637,7 @@ def select_candidates_from_search_results(
 
         if not combined_text:
             if config.verbose:
-                print(f"Warning: Search result at index {idx} has no textual content. Skipping.")
+                logger.debug("Search result at index %d has no textual content. Skipping.", idx)
             continue
 
         normalized_items.append(
@@ -653,14 +654,14 @@ def select_candidates_from_search_results(
         )
 
     if not normalized_items:
-        print("No searchable textual content extracted from search results.")
+        logger.debug("No searchable textual content extracted from search results.")
         return []
 
     retriever, reranker = load_models(config)
 
     chunk_database = create_corpus_chunks(normalized_items, config)
     if not chunk_database:
-        print("No chunks created from search results.")
+        logger.debug("No chunks created from search results.")
         return []
 
     corpus_embeddings = create_chunk_embeddings(
@@ -669,7 +670,7 @@ def select_candidates_from_search_results(
         verbose=config.verbose,
     )
     if corpus_embeddings is None:
-        print("Failed to compute embeddings for search results.")
+        logger.debug("Failed to compute embeddings for search results.")
         return []
 
     ranked_candidates = rank_items(
@@ -704,7 +705,7 @@ def select_candidates_from_search_results(
             json.dump(serializable_payload, handle, indent=2, ensure_ascii=False)
 
         if config.verbose:
-            print(f"Saved ranked candidates to {path_obj}")
+            logger.debug("Saved ranked candidates to %s", path_obj)
 
     return ranked_candidates
 

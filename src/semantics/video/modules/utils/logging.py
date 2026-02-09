@@ -1,3 +1,11 @@
+"""Logging utilities for video modules.
+
+Re-exports shared UI functions from the platform-level ``ui`` module and
+provides video-specific helpers (gray debug output, external-logging config).
+"""
+
+from __future__ import annotations
+
 import io
 import logging
 import os
@@ -17,11 +25,39 @@ else:
     RESET = Style.RESET_ALL
 
 
-def debug_print(message: str, *, debug: bool) -> None:
-    """Emit a debug message in gray when debugging is enabled."""
-    if debug:
-        print(f"{GRAY}{message}{RESET}")
+# ---------------------------------------------------------------------------
+# Re-export shared UI — every consumer can import from here as before
+# ---------------------------------------------------------------------------
+from ui import (  # noqa: F401 — re-exported
+    debug_print,
+    format_duration,
+    get_all_timings,
+    get_resource_status,
+    info_print,
+    install_abort_handler,
+    is_debug,
+    is_plain,
+    is_spinner_active,
+    print_header,
+    print_summary_table,
+    register_planned_modules,
+    reset_timings,
+    restore_abort_handler,
+    run_module,
+    set_debug,
+    set_plain,
+    skip_module,
+    start_pipeline,
+    start_resource_monitor,
+    stop_pipeline,
+    stop_resource_monitor,
+    update_sub_progress,
+)
 
+
+# ---------------------------------------------------------------------------
+# Video-specific: gray debug output
+# ---------------------------------------------------------------------------
 
 class _GrayStream:
     def __init__(self, original):
@@ -38,7 +74,7 @@ class _GrayStream:
             self._original.write(RESET)
             self._active = False
 
-    def write(self, data):  # pragma: no cover - passthrough wrapper
+    def write(self, data):
         if not data:
             return 0
         self._ensure_started()
@@ -47,16 +83,16 @@ class _GrayStream:
             self._ensure_reset()
         return len(data)
 
-    def flush(self):  # pragma: no cover - passthrough wrapper
+    def flush(self):
         self._original.flush()
 
-    def reset(self):  # pragma: no cover - ensure color cleanup
+    def reset(self):
         self._ensure_reset()
 
-    def isatty(self):  # pragma: no cover - passthrough wrapper
+    def isatty(self):
         return self._original.isatty()
 
-    def fileno(self):  # pragma: no cover - passthrough wrapper
+    def fileno(self):
         return self._original.fileno()
 
 
@@ -94,13 +130,13 @@ def gray_debug_output(enabled: bool):
                     handler_streams.append((handler, original_stream))
 
         _wrap_logger_handlers(logging.root)
-        for logger in logging.Logger.manager.loggerDict.values():  # pragma: no cover - defensive iteration
+        for logger in logging.Logger.manager.loggerDict.values():
             try:
                 _wrap_logger_handlers(logger)
             except Exception:
                 continue
 
-        def _showwarning(message, category, filename, lineno, file=None, line=None):  # pragma: no cover - wrapper
+        def _showwarning(message, category, filename, lineno, file=None, line=None):
             target = file if file is not None else sys.stderr
             if not isinstance(target, _GrayStream):
                 target = _GrayStream(target)
@@ -126,13 +162,14 @@ def gray_debug_output(enabled: bool):
             warnings.showwarning = original_showwarning
         return
 
+    # Non-debug: fully suppress all output including fd-level
     buffer_out = io.StringIO()
     buffer_err = io.StringIO()
     previous_disable_level = logging.root.manager.disable
     logging.disable(logging.CRITICAL)
 
     devnull_fd = saved_stdout_fd = saved_stderr_fd = None
-    if os.name == "posix":  # pragma: no cover - fd redirection only on POSIX
+    if os.name == "posix":
         try:
             devnull_fd = os.open(os.devnull, os.O_WRONLY)
             saved_stdout_fd = os.dup(1)
@@ -147,7 +184,7 @@ def gray_debug_output(enabled: bool):
     sys.stdout = buffer_out
     sys.stderr = buffer_err
 
-    def _showwarning(message, category, filename, lineno, file=None, line=None):  # pragma: no cover - wrapper
+    def _showwarning(message, category, filename, lineno, file=None, line=None):
         target = file if file is not None else buffer_err
         original_showwarning(message, category, filename, lineno, file=target, line=line)
 
@@ -168,7 +205,7 @@ def gray_debug_output(enabled: bool):
         sys.stderr = original_stderr
         warnings.showwarning = original_showwarning
         logging.disable(previous_disable_level)
-        if os.name == "posix":  # pragma: no cover - fd restoration only on POSIX
+        if os.name == "posix":
             try:
                 if saved_stdout_fd is not None:
                     os.dup2(saved_stdout_fd, 1)
@@ -182,8 +219,12 @@ def gray_debug_output(enabled: bool):
                 pass
 
 
+# ---------------------------------------------------------------------------
+# Video-specific: external logging configuration
+# ---------------------------------------------------------------------------
+
 def configure_external_logging(debug: bool) -> None:
-    """Basic logging configuration without touching optional dependencies."""
+    """Basic logging configuration for video-specific dependencies."""
 
     level = logging.DEBUG if debug else logging.INFO
     root = logging.getLogger()
@@ -200,8 +241,7 @@ def configure_external_logging(debug: bool) -> None:
             continue
 
     try:
-        import absl.logging as absl_logging  # type: ignore
-
+        import absl.logging as absl_logging
         if debug:
             absl_logging.set_verbosity(absl_logging.INFO)
         else:

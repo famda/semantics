@@ -117,6 +117,7 @@ nvidia-curand-cu12==10.3.9.90
 nvidia-cusolver-cu12==11.7.3.90
 nvidia-cusparse-cu12==12.5.8.93
 nvidia-cusparselt-cu12==0.7.1
+nvidia-ml-py==13.590.48
 nvidia-nccl-cu12==2.27.3
 nvidia-nvjitlink-cu12==12.8.93
 nvidia-nvtx-cu12==12.8.90
@@ -164,6 +165,7 @@ requests==2.32.5
 resampy==0.4.3
 retrying==1.4.2
 rich==14.2.0
+rich-click==1.9.0
 ruamel-yaml==0.19.1
 sacremoses==0.1.1
 safetensors==0.7.0

@@ -36,7 +36,7 @@ import soundfile as sf
 import torch
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print
 
 if TYPE_CHECKING:
     from config import TranscribeExperimentalConfig
@@ -520,7 +520,7 @@ def _run_diarization(
     from omegaconf import DictConfig, OmegaConf
     import wget
 
-    print("INFO: Running speaker diarization")
+    debug_print("Running speaker diarization", debug=debug)
 
     diarization_dir = os.path.join(output_folder, "diarization_experimental")
     os.makedirs(diarization_dir, exist_ok=True)
@@ -1181,8 +1181,8 @@ def handle(
     Returns:
         Tuple of (transcription_data dict, full_transcription string).
     """
-    print(
-        "INFO: Starting experimental transcription (native long-form mode with diarization)"
+    info_print(
+        "Starting experimental transcription (native long-form mode with diarization)"
     )
 
     # Extract config values using defaults helper (per REFACTORING_PRINCIPLES.md)
@@ -1214,7 +1214,7 @@ def handle(
 
     # Optional CTC refinement
     if settings.enable_ctc_refinement and _is_ctc_available():
-        print("INFO: Running CTC forced alignment for word timestamp refinement")
+        debug_print("Running CTC forced alignment for word timestamp refinement", debug=debug)
         _clear_gpu_cache()  # Clear before CTC
         start_time = time.perf_counter()
 
@@ -1264,6 +1264,6 @@ def handle(
     total_time = result["performance"].get("transcription_seconds", 0.0)
     total_time += result["performance"].get("ctc_alignment_seconds", 0.0)
     total_time += result["performance"].get("diarization_seconds", 0.0)
-    print(f"INFO: Experimental transcription completed in {total_time:.2f} seconds")
+    debug_print(f"Experimental transcription completed in {total_time:.2f} seconds", debug=debug)
 
     return result, full_text

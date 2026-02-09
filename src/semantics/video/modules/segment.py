@@ -31,7 +31,7 @@ except ImportError as exc:  # pragma: no cover - dependency guard
         "scenedetect[opencv] is required for video.modules.segment. Install it via requirements."
     ) from exc
 
-from .utils.logging import debug_print
+from .utils.logging import debug_print, info_print
 
 
 @dataclass(frozen=True)
@@ -345,7 +345,7 @@ def _extract(
     Returns a tuple of (frames_folder, frame_metadata, segments_json_path).
     """
 
-    print("INFO: Detecting representative video segments")
+    info_print("Detecting representative video segments")
 
     results_path =os.path.join(output_dir,"frames", "segments")
 
@@ -428,10 +428,10 @@ def _extract(
 
     segments_path = output_path / "segments.json"
     segments_path.write_text(json.dumps(segments_payload, indent=2), encoding="utf-8")
-    debug_print(f"INFO: Wrote segments metadata to {segments_path}", debug=debug)
+    debug_print(f"Wrote segments metadata to {segments_path}", debug=debug)
 
     if save_frames:
-        debug_print("INFO: Exporting keyframes to disk", debug=debug)
+        debug_print("Exporting keyframes to disk", debug=debug)
         _export_frames(
             video_path,
             artifacts,
@@ -439,7 +439,7 @@ def _extract(
             image_format="png",
         )
     else:
-        debug_print("INFO: Skipping frame export (set save_frames=True to write images)", debug=debug)
+        debug_print("Skipping frame export (set save_frames=True to write images)", debug=debug)
 
     return str(flat_dir), frames_metadata, str(segments_path)
 

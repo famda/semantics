@@ -4,6 +4,8 @@
 # CLI Framework
 click>=8.2.1
 colorama>=0.4.6
+rich>=14.0.0
+rich-click>=1.9.0
 
 # Configuration
 pydantic>=2.0
@@ -45,3 +47,7 @@ openai>=2.0
 requests>=2.32.5
 tqdm>=4.67.1
 rapidfuzz>=3.14.3
+
+# Monitoring
+psutil>=7.0
+nvidia-ml-py>=12.0

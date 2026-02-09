@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Iterable, List, Optional
 
 from unstructured.partition.auto import partition
 
+from .utils.logging import info_print, debug_print
+
 if TYPE_CHECKING:
     from ..config import ExtractConfig
 
@@ -71,7 +73,7 @@ def _build_page(path: Path, *, verbose: bool = False) -> Optional[ExtractedPage]
             elements_raw = list(partition(filename=str(path)))
         except Exception as exc:  # pragma: no cover - depends on external parser
             if verbose:
-                print(f"Failed to parse structured content for {path}: {exc}")
+                debug_print(f"Failed to parse structured content for {path}: {exc}", debug=verbose)
 
     elements = elements_raw
     title = _derive_title(markdown_content, elements)
@@ -92,7 +94,7 @@ def _discover_markdown_files(content_dir: Path) -> List[Path]:
 def extract_content(content_dir: Path, *, verbose: bool = False) -> List[Path]:
     markdown_files = _discover_markdown_files(content_dir)
     if not markdown_files:
-        print(f"No markdown files found in {content_dir}")
+        info_print(f"No markdown files found in {content_dir}")
         return []
 
     output_paths: List[Path] = []
@@ -109,10 +111,10 @@ def extract_content(content_dir: Path, *, verbose: bool = False) -> List[Path]:
         output_paths.append(json_path)
 
         if verbose:
-            print(f"Extracted structured content to {json_path}")
+            debug_print(f"Extracted structured content to {json_path}", debug=verbose)
 
     if verbose:
-        print(f"Processed {len(output_paths)} markdown files in {content_dir}")
+        debug_print(f"Processed {len(output_paths)} markdown files in {content_dir}", debug=verbose)
 
     return output_paths
 

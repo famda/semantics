@@ -11,7 +11,7 @@ from scenedetect.detectors import ContentDetector, ThresholdDetector
 from scenedetect.frame_timecode import FrameTimecode
 from scenedetect.video_splitter import split_video_ffmpeg
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print
 
 if TYPE_CHECKING:
     from config import ScenesConfig
@@ -104,7 +104,7 @@ def _split_scenes(
     os.makedirs(scenes_root, exist_ok=True)
     results_path = os.path.join(scenes_root, "scenes.json")
 
-    print("INFO: Detecting video scenes")
+    info_print("Detecting video scenes")
 
     video_handle = open_video(input_file)
     scene_manager = SceneManager()
@@ -134,7 +134,7 @@ def _split_scenes(
     debug_print(f"Detected {len(scene_list)} scene boundaries", debug=debug)
 
     if not scene_list:
-        print("INFO: No scene cuts detected. Treating the entire video as a single scene.")
+        info_print("No scene cuts detected. Treating the entire video as a single scene.")
         scene_list = [
             _fallback_scene_bounds(video_handle),
         ]
@@ -206,6 +206,6 @@ def _split_scenes(
         f"Scene processing completed in {total_elapsed:.2f} seconds",
         debug=debug,
     )
-    debug_print("INFO: Scene detection completed", debug=debug)
+    debug_print("Scene detection completed", debug=debug)
 
     return {"scenes": results}

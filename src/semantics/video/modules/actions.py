@@ -24,7 +24,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print, update_sub_progress
 
 # Import PyAV globally to ensure it's available for the persistent container
 try:
@@ -759,7 +759,7 @@ def _recognize_actions(
     debug_print(f"Clip span: {clip_span} frames ({clip_span/fps:.2f}s)", debug=debug)
     
     # Run activity pre-scan
-    debug_print("INFO: Scanning video for activity regions", debug=debug)
+    debug_print("Scanning video for activity regions", debug=debug)
     try:
         segments, scan_meta = _fast_activity_scan(
             video_path,
@@ -790,6 +790,7 @@ def _recognize_actions(
     
     # Process clips in batches
     all_predictions: List[Dict[str, Any]] = []
+    total_batches = len(range(0, len(clip_starts), settings.batch_size))
     
     iterator = range(0, len(clip_starts), settings.batch_size)
     if debug:
@@ -803,6 +804,7 @@ def _recognize_actions(
     # OPTIMIZATION: Open PyAV container ONCE for the whole loop
     try:
         container = av.open(video_path)
+        batch_count = 0
         
         for batch_idx in iterator:
             batch_start_indices = clip_starts[batch_idx:batch_idx + settings.batch_size]
@@ -825,6 +827,9 @@ def _recognize_actions(
                     start_time = start_frame / fps
                     end_time = min((start_frame + clip_span) / fps, duration)
                     batch_times.append((start_frame, start_time, end_time))
+            
+            batch_count += 1
+            update_sub_progress(batch_count, total_batches, "batches")
             
             if not batch_clips:
                 continue
@@ -995,7 +1000,7 @@ def handle(
     debug: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Main entry point for action recognition."""
-    print("INFO: Recognizing actions in video")
+    info_print("Recognizing actions in video")
 
     # Extract config values
     if config:

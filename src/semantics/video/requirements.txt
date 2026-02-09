@@ -4,6 +4,8 @@
 # CLI Framework
 click>=8.2.1
 colorama>=0.4.6
+rich>=14.0.0
+rich-click>=1.9.0
 
 # Configuration
 pydantic>=2.0
@@ -28,7 +30,6 @@ numpy<3.0.0
 accelerate>=1.12.0
 
 # Embeddings & Models
-git+https://github.com/openai/CLIP.git
 transformers>=4.57.0
 timm>=1.0.24
 einops>=0.8.1
@@ -44,3 +45,7 @@ rapidfuzz>=3.14.3
 tqdm>=4.67.1
 requests>=2.32.5
 httpx<0.28
+
+# Monitoring
+psutil>=7.0
+nvidia-ml-py>=12.0

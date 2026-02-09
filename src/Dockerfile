@@ -57,15 +57,16 @@ WORKDIR /platform
 
 COPY ["src/semantics", "temp"]
 COPY ["src/semantics/global_helpers.py", "."]
+COPY ["src/semantics/ui.py", "."]
 COPY ["src/semantics/setup-agents.sh", "/usr/local/bin/setup-agents.sh"]
-# COPY ["src/semantics/setup-cli.sh", "/usr/local/bin/setup-cli.sh"]
-COPY ["src/semantics/setup-cli-uv.sh", "/usr/local/bin/setup-cli-uv.sh"]
+COPY ["src/semantics/setup-cli.sh", "/usr/local/bin/setup-cli.sh"]
+# COPY ["src/semantics/setup-cli-uv.sh", "/usr/local/bin/setup-cli-uv.sh"]
 
-RUN chmod +x /usr/local/bin/setup-cli-uv.sh /usr/local/bin/setup-agents.sh
+RUN chmod +x /usr/local/bin/setup-cli.sh /usr/local/bin/setup-agents.sh
 RUN /usr/local/bin/setup-agents.sh "${WORKER_TYPES}" ./temp . && rm -rf ./temp
 
 # Create per-module venvs and install their requirements using uv
-RUN find /platform -type f -name requirements.txt | while read -r req_file; do /usr/local/bin/setup-cli-uv.sh "$req_file"; done
+RUN find /platform -type f -name requirements.lock | while read -r req_file; do /usr/local/bin/setup-cli.sh "$req_file"; done
 
 WORKDIR /workspaces
 

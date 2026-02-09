@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 from crawl4ai import AsyncWebCrawler, BFSDeepCrawlStrategy, BrowserConfig, CrawlerRunConfig
 from crawl4ai.cache_context import CacheMode
+
+from .utils.logging import info_print
 from crawl4ai.models import CrawlResult, CrawlResultContainer
 from playwright.async_api import Error as PlaywrightError
 
@@ -349,7 +351,7 @@ def download_urls(
     if not urls:
         return []
 
-    print("INFO: Downloading contents")
+    info_print("Downloading contents")
 
     base_output_directory = Path(output_directory)
 

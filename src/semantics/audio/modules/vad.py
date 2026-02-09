@@ -16,7 +16,7 @@ import torch
 import torchaudio
 
 from .utils.chunks import cleanup_chunks, compute_chunk_offsets, split_audio
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print, update_sub_progress
 
 if TYPE_CHECKING:
     from config import VadConfig
@@ -62,7 +62,7 @@ def handle(
     min_speech_duration_ms = config.min_speech_duration_ms if config else 250
     min_silence_duration_ms = config.min_silence_duration_ms if config else 100
 
-    print("INFO: Performing Voice Activity Detection (VAD)")
+    info_print("Performing Voice Activity Detection (VAD)")
 
     debug_print("Loading Silero VAD model", debug=debug)
     with gray_debug_output(debug):
@@ -88,6 +88,7 @@ def handle(
         for index, (chunk_path, offset_seconds) in enumerate(
             zip(chunks, offsets), start=1
         ):
+            update_sub_progress(index - 1, len(chunks), "chunks")
             debug_print(
                 f"Running VAD on chunk {index}/{len(chunks)}: {chunk_path}", debug=debug
             )
@@ -123,6 +124,7 @@ def handle(
                     }
                 )
 
+            update_sub_progress(index, len(chunks), "chunks")
             del wav
     finally:
         cleanup_chunks(chunk_dir)
@@ -132,3 +134,4 @@ def handle(
         json.dump(json_data, f, indent=4)
 
     return json_data
+

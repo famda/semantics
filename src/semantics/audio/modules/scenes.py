@@ -20,7 +20,7 @@ from nltk.corpus import stopwords
 from nltk.tokenize import sent_tokenize, word_tokenize
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print
 
 # Import config type for type hints
 from typing import TYPE_CHECKING
@@ -1154,7 +1154,7 @@ def _chapters(
     *,
     debug: bool = False,
 ):
-    print("INFO: Generating chapter summaries")
+    info_print("Generating chapter summaries")
 
     try:
         segments_path, working_dir = _resolve_segment_source(

@@ -145,11 +145,11 @@ class TranscribeExperimentalConfig(BaseModel):
         description="HuggingFace model ID for Whisper (e.g., openai/whisper-large-v3, distil-whisper/large-v3)",
     )
     batch_size: int = Field(
-        default=24,
+        default=8,
         description="Number of parallel batches for inference (reduce for OOM)",
     )
     chunk_length_s: int = Field(
-        default=30,
+        default=60,
         description="Chunk length in seconds for batched processing",
     )
     use_flash_attention: bool = Field(

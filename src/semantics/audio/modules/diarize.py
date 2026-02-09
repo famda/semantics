@@ -16,7 +16,7 @@ import wget
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from omegaconf import OmegaConf
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print
 
 if TYPE_CHECKING:
     from ..config import DiarizeConfig
@@ -84,7 +84,7 @@ def handle(
         config.long_audio_max_rp_threshold_max if config else 0.2
     )
 
-    print("INFO: Performing speaker diarization")
+    info_print("Performing speaker diarization")
 
     diarization_dir = os.path.join(output_folder, "diarization")
     os.makedirs(diarization_dir, exist_ok=True)
@@ -213,7 +213,7 @@ def _create_msdd_config(
                 f"INFO: Downloading diarization config from {config_url}", debug=True
             )
         else:
-            print(f"INFO: Downloading diarization config from {config_url}")
+            info_print(f"Downloading diarization config from {config_url}")
         with gray_debug_output(debug):
             config_path = wget.download(config_url, config_path)
 

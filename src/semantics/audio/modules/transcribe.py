@@ -18,7 +18,7 @@ import torch
 from faster_whisper import WhisperModel
 
 from .utils.chunks import AudioChunk, cleanup_chunks, split_audio, split_audio_with_overlap
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print, update_sub_progress
 
 if TYPE_CHECKING:
     from config import TranscribeConfig
@@ -58,7 +58,7 @@ def handle(
         ("cpu", "int8"),
     ]
 
-    print("INFO: Transcribing the audio file")
+    info_print("Transcribing the audio file")
 
     transcription_folder = os.path.join(output_folder, "transcription")
     os.makedirs(transcription_folder, exist_ok=True)
@@ -79,7 +79,8 @@ def handle(
 
     try:
         for idx, chunk in enumerate(chunk_infos, start=1):
-            print(f"INFO: Processing chunk {idx}/{len(chunk_infos)}: {chunk.path}")
+            update_sub_progress(idx - 1, len(chunk_infos), "chunks")
+            info_print(f"Processing chunk {idx}/{len(chunk_infos)}: {chunk.path}")
 
             while True:
                 try:

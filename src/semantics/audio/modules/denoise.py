@@ -16,7 +16,7 @@ import torch
 from audio_denoiser.AudioDenoiser import AudioDenoiser
 
 from .utils.chunks import cleanup_chunks, concatenate_audio, split_audio
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print, update_sub_progress
 
 if TYPE_CHECKING:
     from config import DenoiseConfig
@@ -58,7 +58,7 @@ def handle(
     chunk_length = config.chunk_length if config else 900
     allow_auto_scale = config.allow_auto_scale if config else True
 
-    print("INFO: Performing audio denoising")
+    info_print("Performing audio denoising")
 
     with gray_debug_output(debug):
         denoiser, device = _get_denoiser()
@@ -164,10 +164,12 @@ def handle(
     chunk_outputs = []
     try:
         for index, chunk_path in enumerate(chunks):
+            update_sub_progress(index, len(chunks), "chunks")
             debug_print(f"Processing chunk {index + 1}/{len(chunks)}: {chunk_path}", debug=debug)
             chunk_output = str(chunk_dir / f"denoise_{index:05d}.wav")
             run_denoiser(chunk_path, chunk_output)
             chunk_outputs.append(chunk_output)
+        update_sub_progress(len(chunks), len(chunks), "chunks")
 
         debug_print(f"Concatenating {len(chunk_outputs)} denoised chunk(s)", debug=debug)
         concatenate_audio(chunk_outputs, out_audio_file, chunk_dir)

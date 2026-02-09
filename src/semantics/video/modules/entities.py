@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import torch
 from transformers import pipeline
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print
 
 if TYPE_CHECKING:
     from ..config import NerConfig
@@ -58,7 +58,7 @@ def handle(
     Returns:
         Dictionary with NER results or None if no captions available.
     """
-    print("INFO: Performing Named Entity Recognition on captions")
+    info_print("Performing Named Entity Recognition on captions")
 
     # Extract config values with inline defaults
     model_name = config.model_name if config else "Jean-Baptiste/roberta-large-ner-english"
@@ -115,7 +115,7 @@ def handle(
         json.dump(output_data, f, indent=4, ensure_ascii=False)
 
     entity_count = output_data["summary"]["total_entities"]
-    print(f"INFO: NER complete - {entity_count} entities found")
+    debug_print(f"NER complete - {entity_count} entities found", debug=debug)
     debug_print(f"NER results saved to {output_path}", debug=debug)
     return output_data
 
@@ -141,7 +141,7 @@ def _get_ner_pipeline(
             model=model_name,
             device=0 if resolved_device == "cuda" else -1,
             aggregation_strategy=aggregation_strategy,
-            framework="pt",  # Force PyTorch to avoid Keras 3 conflicts
+            framework="pt",
         )
 
     _NER_PIPELINE_CACHE[cache_key] = ner

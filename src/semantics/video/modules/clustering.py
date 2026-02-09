@@ -16,7 +16,7 @@ import numpy as np
 from tqdm import tqdm as _tqdm
 from PIL import Image as _Image
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print, update_sub_progress
 
 if TYPE_CHECKING:
     from config import ClusteringConfig
@@ -131,7 +131,7 @@ class AsyncVideoLoader:
                 tensors = list(pool.map(_prep_frame, batch_frames))
                 try:
                     batch_tensor = torch.stack(tensors)
-                except:
+                except Exception:
                     batch_tensor = None
                 self.queue.put((batch_indices, batch_tensor, [f.copy() for f in batch_frames]))
 
@@ -152,7 +152,7 @@ class AsyncVideoLoader:
         # Drain queue to allow thread to exit
         while not self.queue.empty():
             try: self.queue.get_nowait()
-            except: pass
+            except Exception: pass
 
 
 def handle(
@@ -219,7 +219,7 @@ def _cluster_frames(
     report_path = os.path.join(clusters_root, "clusters.json")
 
     fps_arg = fps if (isinstance(fps, (int, float)) and fps > 0) else None
-    print(f"INFO: Clustering frames at {fps_arg if fps_arg is not None else 'all'} fps")
+    info_print(f"Clustering frames at {fps_arg if fps_arg is not None else 'all'} fps")
 
     frame_numbers: List[int] = _probe_frame_indices(video_file, fps_arg or 1.0)
     frame_data: List[dict] = [{"index": int(idx)} for idx in frame_numbers]
@@ -235,7 +235,7 @@ def _cluster_frames(
         return clusters_root, [], report_path
 
     if os.path.isdir(clusters_root):
-        print("INFO: Cleaning existing clusters folder")
+        info_print("Cleaning existing clusters folder")
         try:
             shutil.rmtree(clusters_root)
         except Exception as e:
@@ -248,7 +248,7 @@ def _cluster_frames(
     import torch as _torch
     import timm as _timm
 
-    print("INFO: Reading frames & extracting features")
+    info_print("Reading frames & extracting features")
     
     with gray_debug_output(debug):
         dev = device if device in ("cpu", "cuda") else ("cuda" if _torch.cuda.is_available() else "cpu")
@@ -280,7 +280,8 @@ def _cluster_frames(
     # We MUST re-read later. 
 
     processed_count = 0
-    pbar_ctx = _tqdm(total=len(frame_numbers), desc="Extracting features", unit="frame", colour="#888888") if debug else nullcontext()
+    total_cluster_frames = len(frame_numbers)
+    pbar_ctx = _tqdm(total=total_cluster_frames, desc="Extracting features", unit="frame", colour="#888888") if debug else nullcontext()
 
     with pbar_ctx as pbar:
         try:
@@ -304,19 +305,20 @@ def _cluster_frames(
                 cnt = len(b_indices)
                 processed_count += cnt
                 if pbar: pbar.update(cnt)
+                update_sub_progress(processed_count, total_cluster_frames, "frames")
         except Exception as e:
             print(f"Error in feature extraction loop: {e}")
         finally:
             loader.stop()
 
-    print(f"INFO: Processed {processed_count} frames")
+    info_print(f"Processed {processed_count} frames")
 
     # --- Step 3: Clustering (DBSCAN) ---
     labels = np.zeros(len(feats), dtype=int)
     
     if feats:
         try:
-            print("INFO: Clustering features (DBSCAN)")
+            info_print("Clustering features (DBSCAN)")
             from sklearn.cluster import DBSCAN as _DBSCAN
             feat_mat = np.stack(feats, axis=0)
             
@@ -454,9 +456,9 @@ def _cluster_frames(
         # To optimize, we read linearly and route frames to destinations
         
         if save_clusters or save_keyframes:
-            print("INFO: Saving results and extracting keyframes")
+            info_print("Saving results and extracting keyframes")
         else:
-            print("INFO: Selecting keyframes")
+            info_print("Selecting keyframes")
         
         # ThreadPool for writing images
         max_w = int(workers) if (workers and int(workers) > 0) else 4
@@ -492,7 +494,9 @@ def _cluster_frames(
         # Storage for Keyframe Logic: {cluster_id: {'idxs': [], 'feats': [], 'phashes': []}}
         kf_data = {cid: {'idxs': [], 'feats': [], 'phashes': []} for cid in cluster_map}
 
-        pbar = _tqdm(total=len(sorted_indices), desc="Final Pass", unit="frame", colour="#888888") if debug else nullcontext()
+        total_final_pass = len(sorted_indices)
+        pbar = _tqdm(total=total_final_pass, desc="Final Pass", unit="frame", colour="#888888") if debug else nullcontext()
+        final_pass_count = 0
         
         with pbar as pb:
             for idx in sorted_indices:
@@ -535,6 +539,8 @@ def _cluster_frames(
                     kf_data[lbl]['feats'].append(idx_to_feat[idx]) # Reuse from Step 1
 
                 if pb: pb.update(1)
+                final_pass_count += 1
+                update_sub_progress(final_pass_count, total_final_pass, "frames")
 
         cap.release()
         wait(writer_futures) # Finish writing

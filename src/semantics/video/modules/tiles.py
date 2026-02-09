@@ -7,7 +7,7 @@ from typing import List, Optional, Sequence, TYPE_CHECKING
 import cv2
 from PIL import Image
 
-from .utils.logging import debug_print
+from .utils.logging import debug_print, info_print
 
 if TYPE_CHECKING:
     from config import TilesConfig
@@ -80,7 +80,7 @@ def _create(
     debug: bool = False,
 ):
 
-    print("INFO: Creating video tiles")
+    info_print("Creating video tiles")
 
     # Convert relative paths to absolute paths
     video_file = os.path.abspath(video_file)

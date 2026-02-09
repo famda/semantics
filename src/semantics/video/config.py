@@ -177,8 +177,8 @@ class ObjectsConfig(BaseModel):
         description="DeepFace detector backend: 'retinaface', 'mtcnn', 'opencv', etc.",
     )
     clip_model_name: str = Field(
-        default="ViT-B/32",
-        description="OpenAI CLIP model for object embedding and similarity.",
+        default="openai/clip-vit-base-patch32",
+        description="HuggingFace CLIP model for object embedding and similarity.",
     )
     cluster_base_eps: float = Field(
         default=0.35,
@@ -291,7 +291,7 @@ class ActionsConfig(BaseModel):
         description="Sample every n-th frame. Temporal span = num_frames * frame_sample_rate frames. Higher values capture longer actions (default 4 = ~2.1s clips at 30fps).",
     )
     conf_threshold: float = Field(
-        default=0.40,
+        default=0.50,
         description="Minimum confidence threshold for action predictions (0.0 - 1.0). Lower values capture more actions but may include false positives.",
     )
     top_k: int = Field(

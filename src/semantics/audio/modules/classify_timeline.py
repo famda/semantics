@@ -18,7 +18,7 @@ from transformers.utils import logging as transformers_logging
 from scipy.signal import find_peaks
 from scipy.ndimage import median_filter
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print
 from .vad import _load_vad_model as _shared_load_vad_model
 
 if TYPE_CHECKING:
@@ -950,7 +950,7 @@ def _run_timeline_classification(
         A dictionary containing the analysis results and metadata about the written file.
     """
 
-    print("INFO: Performing timeline audio classification")
+    info_print("Performing timeline audio classification")
 
     classifier = _AudioClassifier(
         device=device,

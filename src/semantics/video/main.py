@@ -6,13 +6,12 @@ detection, scene analysis, captioning, and more.
 
 from __future__ import annotations
 
-import atexit
 import os
 import sys
 import time
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
-import click
+import rich_click as click
 
 # Setup paths before importing local modules
 try:
@@ -35,37 +34,6 @@ except ImportError as e:
 except Exception as e:
     print(f"An unexpected error occurred during initial setup: {e}", file=sys.stderr)
     sys.exit(1)
-
-
-# Start timer for total execution time measurement
-_start_time = time.perf_counter()
-_modules_executed = [False]  # Track if any modules were executed
-
-
-def _print_elapsed_time():
-    """Print total execution time on exit (only if modules were executed)."""
-    if not _modules_executed[0]:
-        return
-    try:
-        elapsed = time.perf_counter() - _start_time
-        secs = int(elapsed)
-        if secs < 60:
-            print(f"Total execution time: {elapsed:.3f} seconds")
-        elif secs < 3600:
-            minutes = secs // 60
-            seconds = secs % 60
-            ms = int((elapsed - secs) * 1000)
-            print(f"Total execution time: {minutes} minute(s) {seconds} second(s) {ms} ms")
-        else:
-            hours = secs // 3600
-            minutes = (secs % 3600) // 60
-            seconds = secs % 60
-            print(f"Total execution time: {hours} hour(s) {minutes} minute(s) {seconds} second(s)")
-    except Exception:
-        pass
-
-
-atexit.register(_print_elapsed_time)
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
@@ -102,6 +70,7 @@ def _coerce_int(value) -> Optional[int]:
 @click.option("--save-frames", is_flag=True, help="Save extracted frames to disk")
 @click.option("-fps", "--frames-per-second", type=int, default=1, help="Frames per second to analyze")
 @click.option("--debug", is_flag=True, help="Enable verbose debug logging")
+@click.option("--plain", is_flag=True, help="Disable rich formatting, use plain text output")
 @click.option("--config", type=click.Path(exists=True), default=None, help="Path to YAML config file")
 def main(
     input_file: str,
@@ -124,6 +93,7 @@ def main(
     save_frames: bool,
     frames_per_second: int,
     debug: bool,
+    plain: bool,
     config: Optional[str],
 ) -> None:
     """
@@ -132,6 +102,30 @@ def main(
     -------------------------------------------
     Extract meaning, not just metadata. Composable AI operations designed for developers.
     """
+    from modules.utils.logging import (
+        configure_external_logging,
+        debug_print,
+        gray_debug_output,
+        info_print,
+        print_header,
+        print_summary_table,
+        reset_timings,
+        run_module,
+        set_debug,
+        set_plain,
+        skip_module,
+        install_abort_handler,
+        restore_abort_handler,
+        register_planned_modules,
+        start_pipeline,
+        stop_pipeline,
+    )
+
+    set_plain(plain)
+    set_debug(debug)
+    reset_timings()
+    _start_time = time.perf_counter()
+
     os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0" if debug else "3"
 
     # Check which modules require frame selection modes
@@ -161,11 +155,13 @@ def main(
     if config:
         try:
             from config import load_video_config
-
             video_config = load_video_config(config)
         except Exception as exc:
             click.echo(f"Error: Failed to load config from {config}: {exc}", err=True)
             sys.exit(1)
+    if video_config is None:
+        from config import VideoConfig
+        video_config = VideoConfig()
 
     # Create output directories
     if not os.path.exists(output_folder):
@@ -198,12 +194,37 @@ def main(
         click.echo(f"Error: The file {file} is not a supported video file type.", err=True)
         sys.exit(1)
 
-    from modules.utils.logging import configure_external_logging, gray_debug_output
-
     configure_external_logging(debug)
+    print_header("video", file)
 
-    # Mark that we're executing modules (for execution time display)
-    _modules_executed[0] = True
+    # Build planned module list
+    planned: list[str] = []
+    if from_frames:
+        planned.append("Frame Extraction")
+    elif from_segments:
+        planned.append("Segment Extraction")
+    elif from_clustering:
+        planned.append("Frame Clustering")
+    if scenes:
+        planned.append("Scene Detection")
+    if captions:
+        planned.append("Captions")
+    if tiles:
+        planned.append("Tiles")
+    if extract_text:
+        planned.append("OCR")
+    if extract_objects:
+        planned.append("Object Detection")
+    if classify:
+        planned.append("Classification")
+    if named_entities:
+        planned.append("Named Entities")
+    if actions:
+        planned.append("Action Recognition")
+
+    register_planned_modules(planned)
+    start_pipeline(len(planned), "video", file)
+    install_abort_handler()
 
     # Frame selection state
     frame_indices_to_process: list[int] = []
@@ -212,215 +233,233 @@ def main(
     frames_file = ""
     selection_mode: str | None = None
 
-    # Extract frames based on selected mode
-    if from_frames:
-        selection_mode = "frames"
-        with gray_debug_output(debug):
-            from modules import frames as frames_module
-
-        frames_cfg = video_config.frames if video_config else None
-        # Override target_fps in config if frames_per_second CLI flag was provided
-        if frames_cfg and frames_per_second is not None:
-            frames_cfg.target_fps = frames_per_second
-        elif frames_cfg is None and frames_per_second is not None:
-            from config import FramesConfig
-            frames_cfg = FramesConfig(target_fps=frames_per_second)
-        frames_folder, frame_data, frames_file = frames_module.handle(
-            file,
-            temp_folder,
-            config=frames_cfg,
-            save_frames=save_frames,
-            debug=debug,
-        )
-
-    elif from_segments:
-        selection_mode = "segments"
-        with gray_debug_output(debug):
-            from modules import segment as segment_module
-
-        segments_cfg = video_config.segments if video_config else None
-        frames_folder, frame_data, frames_file = segment_module.handle(
-            file,
-            temp_folder,
-            config=segments_cfg,
-            save_frames=save_frames,
-            debug=debug,
-        )
-
-    elif from_clustering:
-        selection_mode = "clustering"
-        with gray_debug_output(debug):
-            from modules import clustering as clustering_module
-
-        clustering_cfg = video_config.clustering if video_config else None
-        frames_folder, frame_data, frames_file = clustering_module.handle(
-            file,
-            temp_folder,
-            config=clustering_cfg,
-            save_frames=save_frames,
-            debug=debug,
-        )
-
-    # Collect frame indices from extracted data
-    if isinstance(frame_data, list) and selection_mode:
-        collected: list[int] = []
-        if selection_mode == "frames":
-            positions = select_frame_indices(frame_data, frames_per_second)
-            for pos in positions:
-                if 0 <= pos < len(frame_data):
-                    entry = frame_data[pos]
-                    idx = _coerce_int(entry.get("index", pos) if isinstance(entry, dict) else pos)
-                    if idx is not None:
-                        collected.append(idx)
-        elif selection_mode == "segments":
-            for entry in frame_data:
-                if isinstance(entry, dict):
-                    idx = _coerce_int(entry.get("index"))
-                    if idx is not None:
-                        collected.append(idx)
-        elif selection_mode == "clustering":
-            for entry in frame_data:
-                if isinstance(entry, dict):
-                    if entry.get("keyframe") is False:
-                        continue
-                    idx = _coerce_int(entry.get("index") or entry.get("frame_index"))
-                    if idx is not None:
-                        collected.append(idx)
-        if collected:
-            frame_indices_to_process = sorted(dict.fromkeys(collected))
-
-    # Scene extraction
-    if scenes:
-        from modules import scenes as scenes_module
-
-        scenes_cfg = video_config.scenes if video_config else None
-        scenes_module.handle(file, temp_folder, config=scenes_cfg, debug=debug)
-
-    if frame_indices_to_process:
-        print(f"INFO: Frames selected for processing ({len(frame_indices_to_process)})")
-
-    # Caption extraction
-    if captions:
-        if not frame_indices_to_process:
-            click.echo("ERROR: Captions requested but no frame indexes selected", err=True)
-        else:
+    try:
+        # Extract frames based on selected mode
+        if from_frames:
+            selection_mode = "frames"
             with gray_debug_output(debug):
-                from modules import captions as captions_module
+                from modules import frames as frames_module
 
-            captions_cfg = video_config.captions if video_config else None
-            captions_module.handle(
+            frames_cfg = video_config.frames if video_config else None
+            if frames_cfg and frames_per_second is not None:
+                frames_cfg.target_fps = frames_per_second
+            elif frames_cfg is None and frames_per_second is not None:
+                from config import FramesConfig
+                frames_cfg = FramesConfig(target_fps=frames_per_second)
+            (frames_folder, frame_data, frames_file), _ = run_module(
+                "Frame Extraction", frames_module.handle,
                 file,
                 temp_folder,
-                config=captions_cfg,
-                frame_indices=frame_indices_to_process,
+                config=frames_cfg,
+                save_frames=save_frames,
                 debug=debug,
             )
 
-    # Tile creation
-    if tiles:
-        if not frame_indices_to_process:
-            click.echo("ERROR: Tiles requested but no frame indexes selected", err=True)
-        else:
-            if debug:
-                preview = frame_indices_to_process[:10]
-                print(f"DEBUG: Sample frame indexes for tiles: {preview}")
+        elif from_segments:
+            selection_mode = "segments"
             with gray_debug_output(debug):
-                from modules import tiles as tiles_module
+                from modules import segment as segment_module
 
-            tiles_cfg = video_config.tiles if video_config else None
-            tiles_module.handle(
+            segments_cfg = video_config.segments if video_config else None
+            (frames_folder, frame_data, frames_file), _ = run_module(
+                "Segment Extraction", segment_module.handle,
                 file,
                 temp_folder,
-                config=tiles_cfg,
-                frame_indices=frame_indices_to_process,
+                config=segments_cfg,
+                save_frames=save_frames,
                 debug=debug,
             )
 
-    # OCR (text extraction)
-    if extract_text:
-        if not frame_indices_to_process:
-            click.echo("ERROR: OCR requested but no frame indexes selected", err=True)
-        else:
+        elif from_clustering:
+            selection_mode = "clustering"
             with gray_debug_output(debug):
-                from modules import ocr as ocr_module
+                from modules import clustering as clustering_module
 
-            ocr_cfg = video_config.ocr if video_config else None
-            ocr_module.handle(
+            clustering_cfg = video_config.clustering if video_config else None
+            (frames_folder, frame_data, frames_file), _ = run_module(
+                "Frame Clustering", clustering_module.handle,
                 file,
                 temp_folder,
-                config=ocr_cfg,
-                frame_indices=frame_indices_to_process,
+                config=clustering_cfg,
+                save_frames=save_frames,
                 debug=debug,
             )
 
-    # Object detection
-    if extract_objects:
-        with gray_debug_output(debug):
-            from modules import objects as objects_module
+        # Collect frame indices from extracted data
+        if isinstance(frame_data, list) and selection_mode:
+            collected: list[int] = []
+            if selection_mode == "frames":
+                positions = select_frame_indices(frame_data, frames_per_second)
+                for pos in positions:
+                    if 0 <= pos < len(frame_data):
+                        entry = frame_data[pos]
+                        idx = _coerce_int(entry.get("index", pos) if isinstance(entry, dict) else pos)
+                        if idx is not None:
+                            collected.append(idx)
+            elif selection_mode == "segments":
+                for entry in frame_data:
+                    if isinstance(entry, dict):
+                        idx = _coerce_int(entry.get("index"))
+                        if idx is not None:
+                            collected.append(idx)
+            elif selection_mode == "clustering":
+                for entry in frame_data:
+                    if isinstance(entry, dict):
+                        if entry.get("keyframe") is False:
+                            continue
+                        idx = _coerce_int(entry.get("index") or entry.get("frame_index"))
+                        if idx is not None:
+                            collected.append(idx)
+            if collected:
+                frame_indices_to_process = sorted(dict.fromkeys(collected))
 
-        objects_cfg = video_config.objects if video_config else None
-        objects_module.handle(
-            file,
-            temp_folder,
-            config=objects_cfg,
-            object_classes=list(object_classes),
-            frame_indices=frame_indices_to_process,
-            perform_clustering=cluster_objects,
-            save_annotations=save_annotations,
-            debug=debug,
-        )
+        # Scene extraction
+        if scenes:
+            from modules import scenes as scenes_module
 
-    # Image classification
-    if classify:
-        if not frame_indices_to_process:
-            click.echo("ERROR: Classification requested but no frame indexes selected", err=True)
-        else:
+            scenes_cfg = video_config.scenes if video_config else None
+            _, _ = run_module(
+                "Scene Detection", scenes_module.handle,
+                file, temp_folder, config=scenes_cfg, debug=debug,
+            )
+
+        if frame_indices_to_process:
+            debug_print(f"Frames selected for processing: {len(frame_indices_to_process)}", debug=debug)
+
+        # Caption extraction
+        if captions:
+            if not frame_indices_to_process:
+                skip_module("Captions", "no frame indexes selected")
+            else:
+                with gray_debug_output(debug):
+                    from modules import captions as captions_module
+
+                captions_cfg = video_config.captions if video_config else None
+                _, _ = run_module(
+                    "Captions", captions_module.handle,
+                    file,
+                    temp_folder,
+                    config=captions_cfg,
+                    frame_indices=frame_indices_to_process,
+                    debug=debug,
+                )
+
+        # Tile creation
+        if tiles:
+            if not frame_indices_to_process:
+                skip_module("Tiles", "no frame indexes selected")
+            else:
+                if debug:
+                    preview = frame_indices_to_process[:10]
+                    debug_print(f"Sample frame indexes for tiles: {preview}", debug=debug)
+                with gray_debug_output(debug):
+                    from modules import tiles as tiles_module
+
+                tiles_cfg = video_config.tiles if video_config else None
+                _, _ = run_module(
+                    "Tiles", tiles_module.handle,
+                    file,
+                    temp_folder,
+                    config=tiles_cfg,
+                    frame_indices=frame_indices_to_process,
+                    debug=debug,
+                )
+
+        # OCR (text extraction)
+        if extract_text:
+            if not frame_indices_to_process:
+                skip_module("OCR", "no frame indexes selected")
+            else:
+                with gray_debug_output(debug):
+                    from modules import ocr as ocr_module
+
+                ocr_cfg = video_config.ocr if video_config else None
+                _, _ = run_module(
+                    "OCR", ocr_module.handle,
+                    file,
+                    temp_folder,
+                    config=ocr_cfg,
+                    frame_indices=frame_indices_to_process,
+                    debug=debug,
+                )
+
+        # Object detection
+        if extract_objects:
             with gray_debug_output(debug):
-                from modules import classify as classify_module
+                from modules import objects as objects_module
 
-            classification_cfg = video_config.classification if video_config else None
-            classify_module.handle(
+            objects_cfg = video_config.objects if video_config else None
+            _, _ = run_module(
+                "Object Detection", objects_module.handle,
                 file,
                 temp_folder,
-                config=classification_cfg,
+                config=objects_cfg,
+                object_classes=list(object_classes),
                 frame_indices=frame_indices_to_process,
+                perform_clustering=cluster_objects,
                 save_annotations=save_annotations,
                 debug=debug,
             )
 
-    # Named Entity Recognition (from captions)
-    if named_entities:
-        captions_json = os.path.join(temp_folder, "captions", "captions.json")
-        if not captions or not os.path.exists(captions_json):
-            click.echo(
-                "ERROR: NER requires captions. Use -c/--captions flag first.",
-                err=True,
-            )
-        else:
-            with gray_debug_output(debug):
-                from modules import entities as entities_module
+        # Image classification
+        if classify:
+            if not frame_indices_to_process:
+                skip_module("Classification", "no frame indexes selected")
+            else:
+                with gray_debug_output(debug):
+                    from modules import classify as classify_module
 
-            ner_cfg = video_config.ner if video_config else None
-            entities_module.handle(
+                classification_cfg = video_config.classification if video_config else None
+                _, _ = run_module(
+                    "Classification", classify_module.handle,
+                    file,
+                    temp_folder,
+                    config=classification_cfg,
+                    frame_indices=frame_indices_to_process,
+                    save_annotations=save_annotations,
+                    debug=debug,
+                )
+
+        # Named Entity Recognition (from captions)
+        if named_entities:
+            captions_json = os.path.join(temp_folder, "captions", "captions.json")
+            if not captions or not os.path.exists(captions_json):
+                skip_module("Named Entities", "requires captions (-c/--captions)")
+            else:
+                with gray_debug_output(debug):
+                    from modules import entities as entities_module
+
+                ner_cfg = video_config.ner if video_config else None
+                _, _ = run_module(
+                    "Named Entities", entities_module.handle,
+                    file,
+                    temp_folder,
+                    config=ner_cfg,
+                    captions_file=captions_json,
+                    debug=debug,
+                )
+
+        # Action recognition
+        if actions:
+            with gray_debug_output(debug):
+                from modules import actions as actions_module
+
+            actions_cfg = video_config.actions if video_config else None
+            _, _ = run_module(
+                "Action Recognition", actions_module.handle,
                 file,
                 temp_folder,
-                config=ner_cfg,
-                captions_file=captions_json,
+                config=actions_cfg,
                 debug=debug,
             )
 
-    # Action recognition
-    if actions:
-        with gray_debug_output(debug):
-            from modules import actions as actions_module
-
-        actions_cfg = video_config.actions if video_config else None
-        actions_module.handle(
-            file,
-            temp_folder,
-            config=actions_cfg,
-            debug=debug,
-        )
+    except KeyboardInterrupt:
+        pass  # abort — summary table will show remaining as "not run"
+    finally:
+        restore_abort_handler()
+        stop_pipeline()
+        total_elapsed = time.perf_counter() - _start_time
+        print_summary_table(total_elapsed=total_elapsed)
 
 
 if __name__ == "__main__":

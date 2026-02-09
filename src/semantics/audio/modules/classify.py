@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import TYPE_CHECKING, Dict, Tuple
 
 import numpy as np
@@ -20,7 +21,7 @@ from .utils.chunks import (
     cleanup_chunks,
     split_audio,
 )
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print, update_sub_progress
 
 if TYPE_CHECKING:
     from ..config import ClassifyConfig
@@ -32,7 +33,7 @@ try:
     import librosa
 except ImportError as e:
     print(f"Error importing necessary libraries: {e}")
-    exit(1)
+    sys.exit(1)
 
 
 def _get_classify_defaults() -> dict:
@@ -59,10 +60,6 @@ def _get_classify_defaults() -> dict:
 _MODEL_CACHE: Dict[
     str, Tuple[AutoFeatureExtractor, AutoModelForAudioClassification, torch.device]
 ] = {}
-
-
-def _info(message: str) -> None:
-    print(message)
 
 
 def _debug(message: str, *, debug: bool) -> None:
@@ -125,7 +122,7 @@ def handle(
     )
     top_n = config.top_n if config else defaults["top_n"]
 
-    _info("INFO: Performing classification")
+    info_print("Performing classification")
 
     base_temp_folder = output_folder
     output_json_folder = os.path.join(base_temp_folder, "classification")
@@ -157,6 +154,7 @@ def handle(
 
     try:
         for idx, chunk_path in enumerate(chunks, start=1):
+            update_sub_progress(idx - 1, len(chunks), "chunks")
             with gray_debug_output(debug):
                 waveform, _ = librosa.load(
                     chunk_path, sr=expected_sample_rate, mono=True
@@ -221,3 +219,4 @@ def handle(
         json.dump(output_data, f, indent=4)
 
     return output_data
+

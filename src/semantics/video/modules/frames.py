@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from global_helpers import VIDEO_FILE_TYPES
-from .utils.logging import gray_debug_output
+from .utils.logging import gray_debug_output, info_print
 
 if TYPE_CHECKING:
     from config import FramesConfig
@@ -442,7 +442,7 @@ def _extract(
         os.makedirs(output_folder, exist_ok=True)
 
     if needs_png_extraction:
-        print("INFO: Extracting frames from the video file")
+        info_print("Extracting frames from the video file")
         _clean_existing_png(output_folder)
         effective_target_fps = float(target_fps) if target_fps and target_fps > 0 else None
         try:
@@ -462,7 +462,7 @@ def _extract(
             print("Error occurred during frame extraction.")
 
     if needs_metadata_extraction:
-        print("INFO: Extracting frame PTS mapping")
+        info_print("Extracting frame PTS mapping")
         ffprobe_command = [
             "ffprobe",
             "-hide_banner",

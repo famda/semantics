@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print
 
 if TYPE_CHECKING:
     from config import ClassificationConfig
@@ -424,7 +424,7 @@ def handle(
     Returns:
         Tuple of (classification_output_folder, results_list).
     """
-    print("INFO: Classifying video frames")
+    info_print("Classifying video frames")
 
     # Extract config values upfront
     settings = _extract_config_settings(config)
@@ -536,6 +536,6 @@ def handle(
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2, cls=_NumpyEncoder)
 
-    print(f"INFO: Classification complete. Processed {len(results_list)} frames.")
+    debug_print(f"Classification complete. Processed {len(results_list)} frames.", debug=debug)
 
     return classification_folder, results_list

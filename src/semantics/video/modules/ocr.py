@@ -16,7 +16,7 @@ except ImportError:  # optional dependency
     easyocr = None
 
 from global_helpers import select_frame_indices
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print, update_sub_progress
 
 if TYPE_CHECKING:
     from config import OcrConfig
@@ -65,14 +65,14 @@ def _extract_text(
     override_indices: Optional[List[int]] = None,
 ):
 
-    print("INFO: Extracting OCR data from video")
+    info_print("Extracting OCR data from video")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"INFO: Using device: {device}")
+    debug_print(f"Using device: {device}", debug=debug)
 
     output_folder = os.path.join(output_folder, "ocr")
     if os.path.isdir(output_folder):
-        print("INFO: Cleaning existing OCR folder")
+        debug_print("Cleaning existing OCR folder", debug=debug)
         try:
             shutil.rmtree(output_folder)
         except Exception as exc:
@@ -161,10 +161,12 @@ def _extract_text(
 
     extracted_data = []
     video_abs_path = os.path.abspath(video_file)
+    total_ocr_frames = len(selected_indices)
     iterable, progress_ctx = _progress_iter(selected_indices, desc="OCR", unit="frame")
 
     try:
         current_pos = -1
+        processed_ocr = 0
         with progress_ctx:
             for frame_index in iterable:
                 # Smart seeking: grab-forward for small gaps, hard seek for large
@@ -189,6 +191,8 @@ def _extract_text(
                 )
 
                 if avg_high_conf is None or avg_high_conf < confidence_threshold:
+                    processed_ocr += 1
+                    update_sub_progress(processed_ocr, total_ocr_frames, "frames")
                     continue
 
                 frame_reference = f"{video_abs_path}#frame_{int(frame_index):08d}"
@@ -230,6 +234,8 @@ def _extract_text(
                     output_filename = f"{int(frame_index):08d}.png"
                     output_image_path = os.path.join(output_folder, output_filename)
                     cv2.imwrite(output_image_path, annotated_frame)
+                processed_ocr += 1
+                update_sub_progress(processed_ocr, total_ocr_frames, "frames")
     finally:
         cap.release()
 
@@ -363,6 +369,6 @@ def handle(
 
     if result_data:
         ocr_json_path = os.path.join(output_folder, "ocr", "ocr.json")
-        print(f"INFO: Saved OCR results to {ocr_json_path}")
+        debug_print(f"Saved OCR results to {ocr_json_path}", debug=debug)
         return ocr_json_path
     return None

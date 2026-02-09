@@ -11,7 +11,6 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from typing import Any, Dict, List, Optional, Sequence, TYPE_CHECKING
 
-import clip
 import cv2
 import numpy as np
 import supervision as sv
@@ -27,7 +26,7 @@ from global_helpers import (
     estimate_dbscan_eps,
     l2_normalize_rows,
 )
-from .utils.logging import debug_print, gray_debug_output
+from .utils.logging import debug_print, gray_debug_output, info_print, update_sub_progress
 
 if TYPE_CHECKING:
     from config import ObjectsConfig
@@ -95,7 +94,7 @@ def _get_objects_defaults() -> dict:
             "face_detect_min_side": 720,
             "face_detect_max_scale": 2.0,
             "detector_backend": "retinaface",
-            "clip_model_name": "ViT-B/32",
+            "clip_model_name": "openai/clip-vit-base-patch32",
             "cluster_base_eps": 0.35,
             "face_cluster_base_eps": 0.20,
             "cluster_dedup_threshold": 0.95,
@@ -223,7 +222,7 @@ class AsyncVideoReader:
 _TF_MODULE: Optional[Any] = None
 _DEEPFACE_CLASS: Optional[Any] = None
 _CLIP_MODEL: Optional[Any] = None
-_CLIP_PREPROCESS: Optional[Any] = None
+_CLIP_PROCESSOR: Optional[Any] = None
 _CLIP_DEVICE: Optional[torch.device] = None
 
 _YOLO_DEVICE: Optional[torch.device] = None
@@ -256,6 +255,17 @@ def _ensure_tensorflow(debug: bool) -> Optional[Any]:
 def _ensure_deepface(debug: bool) -> Optional[Any]:
     global _DEEPFACE_CLASS
     if _DEEPFACE_CLASS is not None: return _DEEPFACE_CLASS
+    # Monkey-patch Keras 3 validation in both deepface and retinaface
+    # (tf-keras is not installed; we use Keras 3 directly via tensorflow)
+    for mod_path in (
+        "deepface.commons.package_utils",
+        "retinaface.commons.package_utils",
+    ):
+        try:
+            _pkg = importlib.import_module(mod_path)
+            _pkg.validate_for_keras3 = lambda: None
+        except Exception:
+            pass
     with gray_debug_output(debug):
         from deepface import DeepFace as _DeepFace
     _DEEPFACE_CLASS = _DeepFace
@@ -299,19 +309,21 @@ def _list_valid_images(folder: str) -> List[str]:
     return sorted(valid)
 
 def _ensure_clip_resources(debug: bool, clip_model_name: str):
-    global _CLIP_MODEL, _CLIP_PREPROCESS, _CLIP_DEVICE
-    if _CLIP_MODEL and _CLIP_PREPROCESS and _CLIP_DEVICE:
-        return _CLIP_MODEL, _CLIP_PREPROCESS, _CLIP_DEVICE
+    global _CLIP_MODEL, _CLIP_PROCESSOR, _CLIP_DEVICE
+    if _CLIP_MODEL and _CLIP_PROCESSOR and _CLIP_DEVICE:
+        return _CLIP_MODEL, _CLIP_PROCESSOR, _CLIP_DEVICE
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     try:
+        from transformers import CLIPModel, CLIPProcessor
         with gray_debug_output(debug):
-            model, preprocess = clip.load(clip_model_name, device=device)
+            model = CLIPModel.from_pretrained(clip_model_name).to(device)
+            processor = CLIPProcessor.from_pretrained(clip_model_name)
         model.eval()
     except Exception as exc:
         print(f"ERROR: CLIP load failed: {exc}")
         return None, None, None
-    _CLIP_MODEL, _CLIP_PREPROCESS, _CLIP_DEVICE = model, preprocess, device
-    return model, preprocess, device
+    _CLIP_MODEL, _CLIP_PROCESSOR, _CLIP_DEVICE = model, processor, device
+    return model, processor, device
 
 def _extract_clip_features(
     image_paths: Sequence[str],
@@ -321,37 +333,38 @@ def _extract_clip_features(
     batch_size: int = 64,
 ) -> Dict[str, np.ndarray]:
     """Extract CLIP features using ThreadPool for preprocessing to maximize GPU."""
-    model, preprocess, device = _ensure_clip_resources(debug, clip_model_name)
+    model, processor, device = _ensure_clip_resources(debug, clip_model_name)
     if not model: return {}
 
     feature_map = {}
-    
-    # Preprocessing function for ThreadPool
-    def _process_img(p):
+
+    # Load images in parallel with ThreadPool
+    def _load_img(p):
         try:
             with Image.open(p) as img:
-                return p, preprocess(img.convert("RGB"))
+                return p, img.convert("RGB").copy()
         except Exception: return p, None
 
-    # Load and preprocess in parallel while GPU is busy
+    # Load and extract in batches
     with ThreadPoolExecutor(max_workers=4) as pool:
         for i in range(0, len(image_paths), batch_size):
             batch_files = image_paths[i:i+batch_size]
-            results = list(pool.map(_process_img, batch_files))
-            
-            valid_tensors = []
+            results = list(pool.map(_load_img, batch_files))
+
+            valid_images = []
             valid_paths = []
-            for path, tensor in results:
-                if tensor is not None:
+            for path, pil_img in results:
+                if pil_img is not None:
                     valid_paths.append(path)
-                    valid_tensors.append(tensor)
-            
-            if not valid_tensors: continue
-            
-            inp = torch.stack(valid_tensors).to(device)
+                    valid_images.append(pil_img)
+
+            if not valid_images: continue
+
+            inputs = processor(images=valid_images, return_tensors="pt")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
             with torch.no_grad():
-                features = model.encode_image(inp)
-                
+                features = model.get_image_features(**inputs)
+
             features_np = features.detach().cpu().numpy().astype(np.float32)
             for idx, p in enumerate(valid_paths):
                 feature_map[p] = features_np[idx]
@@ -878,7 +891,7 @@ def _match_keypoints(bbox, keypoint_detections, keypoints, class_name, *, keypoi
     return results
 
 def handle(input_file: str, output_folder: str, config: "ObjectsConfig | None" = None, *, object_classes: Optional[List[str]] = None, frame_indices: Optional[List[int]] = None, perform_clustering: bool = False, save_annotations: bool = False, debug: bool = False):
-    print("INFO: Detecting objects present in the frames")
+    info_print("Detecting objects present in the frames")
     if config:
         settings = _ObjectsSettings(
             detection_model=config.detection_model,
@@ -914,7 +927,9 @@ def _detect(video_file, output_folder, classes_to_detect, frame_indices=None, de
     _ensure_tensorflow(debug)
     output_folder = os.path.join(output_folder, "objects")
     save_annotations = bool(save_annotations)
-    should_save_images = save_annotations or perform_clustering
+    # Always save crop images — the module is only invoked when -eo is
+    # explicitly requested, so face/object crops should always be persisted.
+    should_save_images = True
     
     if classes_to_detect:
         classes_to_detect = {VIDEO_OBJECT_DETECTION_CATEGORY_MAP[c] for c in classes_to_detect if c in VIDEO_OBJECT_DETECTION_CATEGORY_MAP}
@@ -946,13 +961,15 @@ def _detect(video_file, output_folder, classes_to_detect, frame_indices=None, de
     reader = AsyncVideoReader(video_file, selected_indices)
     reader.start()
     
-    pbar_ctx = tqdm(total=len(selected_indices), desc="Objects", unit="frame", colour="#888888") if debug else nullcontext()
+    total_frames = len(selected_indices)
+    pbar_ctx = tqdm(total=total_frames, desc="Objects", unit="frame", colour="#888888") if debug else nullcontext()
     results_list = []
     all_faces = []
     
     # BATCHING LOGIC
     batch_frames = []
     batch_nums = []
+    processed = 0
     
     with pbar_ctx as pbar:
         for f_num, f_img in reader:
@@ -970,7 +987,9 @@ def _detect(video_file, output_folder, classes_to_detect, frame_indices=None, de
                     box_ann, lbl_ann, mask_ann, poly_ann,
                     results_list, all_faces, debug
                 )
+                processed += len(batch_frames)
                 if pbar: pbar.update(len(batch_frames))
+                update_sub_progress(processed, total_frames, "frames")
                 batch_frames = []
                 batch_nums = []
                 
@@ -986,7 +1005,9 @@ def _detect(video_file, output_folder, classes_to_detect, frame_indices=None, de
                 box_ann, lbl_ann, mask_ann, poly_ann,
                 results_list, all_faces, debug
             )
+            processed += len(batch_frames)
             if pbar: pbar.update(len(batch_frames))
+            update_sub_progress(processed, total_frames, "frames")
             
     reader.stop()
     writer.shutdown()
@@ -1007,7 +1028,8 @@ def _detect(video_file, output_folder, classes_to_detect, frame_indices=None, de
     with open(os.path.join(output_folder, "objects.json"), "w") as f:
         json.dump(json_pl, f, indent=4, cls=_NumpyEncoder)
     if not save_annotations:
-        _cleanup_annotation_outputs(os.path.join(output_folder, "faces"))
+        # Only clean up annotated overlay images (_ann/*_ann.png etc.),
+        # never delete face crops — they are the primary extraction output.
         for d in set(class_dir_cache.values()): _cleanup_annotation_outputs(d)
         
     return output_folder, results_list
@@ -1231,7 +1253,7 @@ def _detect_faces(frame_number, output_folder, save_faces, frame_img, debug, set
     return faces
 
 def _cluster_faces(all_faces, faces_dir, debug, settings):
-    print(f"INFO: Clustering {len(all_faces)} faces")
+    info_print(f"Clustering {len(all_faces)} faces")
     if not os.path.isdir(faces_dir): return None
 
     # Build precomputed feature map from Facenet512 embeddings already
