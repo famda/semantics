@@ -46,10 +46,10 @@ Write-Info "Downloading Semantics CLI ..."
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 $ReleaseUrl  = "https://api.github.com/repos/$Repo/releases/latest"
-$LocalBinary = Join-Path $PSScriptRoot $BinaryName
 
-# Try local binary first (running from repo checkout with pre-built binary)
-if (Test-Path $LocalBinary) {
+# Try local binary first (only when running from a repo checkout, not via irm | iex)
+$LocalBinary = if ($PSScriptRoot) { Join-Path $PSScriptRoot $BinaryName } else { $null }
+if ($LocalBinary -and (Test-Path $LocalBinary)) {
     Copy-Item $LocalBinary (Join-Path $InstallDir $BinaryName) -Force
     Write-Info "Installed from local build."
 }
