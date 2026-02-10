@@ -8,12 +8,11 @@ namespace Semantics.Gateway.Commands;
 /// <summary>
 /// semantics version — shows gateway version and image info.
 /// </summary>
-public sealed class VersionCommand : Command<VersionCommand.Settings>
-{
+public sealed class VersionCommand : Command<VersionCommand.Settings> {
     public sealed class Settings : CommandSettings { }
 
-    public override int Execute(CommandContext context, Settings settings)
-    {
+    public override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken) {
+
         var version = Assembly.GetExecutingAssembly()
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
             ?.InformationalVersion
@@ -29,23 +28,17 @@ public sealed class VersionCommand : Command<VersionCommand.Settings>
 
         // Image info (only if Docker is available)
         var image = DockerRunner.GetImage();
-        try
-        {
+        try {
             DockerRunner.CheckDocker();
-            if (DockerRunner.HasImage(image))
-            {
+            if (DockerRunner.HasImage(image)) {
                 var digest = DockerRunner.GetImageDigest(image);
                 AnsiConsole.MarkupLine($"[dim]Image:[/]   {image}");
                 if (digest is not null)
                     AnsiConsole.MarkupLine($"[dim]Digest:[/]  {digest}");
-            }
-            else
-            {
+            } else {
                 AnsiConsole.MarkupLine($"[dim]Image:[/]   {image} [yellow](not pulled)[/]");
             }
-        }
-        catch
-        {
+        } catch {
             // Docker not available — just show the version
         }
 

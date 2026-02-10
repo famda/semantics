@@ -20,15 +20,13 @@ public static class SemanticsHelpProvider
 
     public static void PrintTopLevelHelp()
     {
-        var console = AnsiConsole.Console;
-
-        console.WriteLine();
-        console.Markup(" [yellow]Usage:[/] [cyan]semantics[/] <command> [[options]]");
-        console.WriteLine();
-        console.WriteLine();
-        console.MarkupLine(" [dim]Semantics CLI \u2014 Unified interface for media intelligence[/]");
-        console.MarkupLine(" [dim]Extract meaning, not just metadata. Composable AI operations designed for developers.[/]");
-        console.WriteLine();
+        AnsiConsole.WriteLine();
+        AnsiConsole.Markup(" [yellow]Usage:[/] [cyan]semantics[/] <command> [[options]]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine(" [dim]Semantics CLI \u2014 Unified interface for media intelligence[/]");
+        AnsiConsole.MarkupLine(" [dim]Extract meaning, not just metadata. Composable AI operations designed for developers.[/]");
+        AnsiConsole.WriteLine();
 
         // Commands panel
         WriteBoxTop("Commands", 59);
@@ -51,34 +49,34 @@ public static class SemanticsHelpProvider
         WriteBoxExample("semantics research -o ./results -s 'AI trends' --download");
         WriteBoxBottom();
 
-        console.WriteLine();
-        console.MarkupLine(" [dim]Run[/] [cyan]semantics <command> --help[/] [dim]for command-specific options.[/]");
-        console.WriteLine();
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine(" [dim]Run[/] [cyan]semantics <command> --help[/] [dim]for command-specific options.[/]");
+        AnsiConsole.WriteLine();
     }
 
     private static void WriteBoxTop(string title, int fillCount)
     {
         var fill = new string(H, fillCount);
-        AnsiConsole.Console.WriteLine($"{TL}{H} {title} {fill}{TR}");
+        AnsiConsole.WriteLine($"{TL}{H} {title} {fill}{TR}");
     }
 
     private static void WriteBoxBottom()
     {
         var fill = new string(H, BoxWidth);
-        AnsiConsole.Console.WriteLine($"{BL}{fill}{BR}");
+        AnsiConsole.WriteLine($"{BL}{fill}{BR}");
     }
 
     private static void WriteBoxRow(string name, string description)
     {
         var nameStr = name.PadRight(14);
         var descStr = description.PadRight(54);
-        AnsiConsole.Console.Markup($"{V}  [green]{nameStr}[/]{descStr}{V}");
-        AnsiConsole.Console.WriteLine();
+        AnsiConsole.Markup($"{V}  [green]{nameStr}[/]{descStr}{V}");
+        AnsiConsole.WriteLine();
     }
 
     private static void WriteBoxExample(string example)
     {
         var padded = example.PadRight(68);
-        AnsiConsole.Console.WriteLine($"{V}  {padded}{V}");
+        AnsiConsole.WriteLine($"{V}  {padded}{V}");
     }
 }

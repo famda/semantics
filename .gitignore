@@ -220,6 +220,8 @@ project.nuget.cache
 [Dd]ebug/
 [Rr]elease/
 
+.vs/
+
 # volumes
 .data/
 

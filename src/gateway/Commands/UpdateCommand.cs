@@ -11,18 +11,14 @@ public sealed class UpdateCommand : Command<UpdateCommand.Settings>
 {
     public sealed class Settings : CommandSettings { }
 
-    public override int Execute(CommandContext context, Settings settings)
-    {
+    public override int Execute(CommandContext context, Settings settings, CancellationToken cancellationToken) {
         var image = DockerRunner.GetImage();
         DockerRunner.CheckDocker();
 
         var ok = DockerPuller.Pull(image, "Updating");
-        if (ok)
-        {
+        if (ok) {
             AnsiConsole.MarkupLine("[green]==> [/]Updated successfully.");
-        }
-        else
-        {
+        } else {
             AnsiConsole.MarkupLine("[red]error:[/] Update failed. Check your connection.");
         }
 
