@@ -1,0 +1,156 @@
+name: Release CLI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/gateway/**'
+      - '.github/workflows/release-cli.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Step 1: Determine next version from conventional commits ──
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
+      skip: ${{ steps.bump.outputs.skip }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history for tag + commit analysis
+
+      - name: Compute next version
+        id: bump
+        shell: bash
+        run: |
+          # Find latest cli-v* tag (fallback to 0.0.0 for the very first release)
+          LATEST_TAG=$(git tag --list 'cli-v*' --sort=-v:refname | head -n1)
+          if [ -z "$LATEST_TAG" ]; then
+            PREV="0.0.0"
+            REV_RANGE="HEAD"
+          else
+            PREV="${LATEST_TAG#cli-v}"
+            REV_RANGE="${LATEST_TAG}..HEAD"
+          fi
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$PREV"
+
+          # Scan commit subjects since last tag for conventional-commit prefixes
+          BUMP="none"
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qiE '^[a-z]+(\(.+\))?!:'; then
+              BUMP="major"; break
+            elif echo "$msg" | grep -qiE '^feat(\(.+\))?:'; then
+              [ "$BUMP" != "major" ] && BUMP="minor"
+            elif echo "$msg" | grep -qiE '^fix(\(.+\))?:'; then
+              [ "$BUMP" = "none" ] && BUMP="patch"
+            fi
+          done < <(git log --format='%s' $REV_RANGE -- src/gateway/ .github/workflows/release-cli.yml)
+
+          if [ "$BUMP" = "none" ]; then
+            echo "skip=true"  >> "$GITHUB_OUTPUT"
+            echo "version=$PREV" >> "$GITHUB_OUTPUT"
+            echo "tag=cli-v$PREV" >> "$GITHUB_OUTPUT"
+            echo "No conventional-commit bump found – skipping release."
+            exit 0
+          fi
+
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR+1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR+1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH+1)) ;;
+          esac
+
+          NEXT="${MAJOR}.${MINOR}.${PATCH}"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=cli-v$NEXT" >> "$GITHUB_OUTPUT"
+          echo "skip=false"    >> "$GITHUB_OUTPUT"
+          echo "Bump: $BUMP  →  $PREV → $NEXT"
+
+  # ── Step 2: Build per-platform binaries ────────────────────────
+  build:
+    needs: version
+    if: needs.version.outputs.skip != 'true'
+
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            artifact: semantics-win-x64.exe
+          - os: ubuntu-latest
+            rid: linux-x64
+            artifact: semantics-linux-x64
+          - os: macos-latest
+            rid: osx-x64
+            artifact: semantics-osx-x64
+          - os: macos-latest
+            rid: osx-arm64
+            artifact: semantics-osx-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Publish
+        run: >
+          dotnet publish src/gateway/semantics-cli.csproj
+          -c Release
+          -r ${{ matrix.rid }}
+          -p:Version=${{ needs.version.outputs.version }}
+          -o publish/
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          if [ "${{ matrix.rid }}" = "win-x64" ]; then
+            mv publish/semantics.exe publish/${{ matrix.artifact }}
+          else
+            mv publish/semantics publish/${{ matrix.artifact }}
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: publish/${{ matrix.artifact }}
+
+  # ── Step 3: Tag, create GitHub Release, upload assets ──────────
+  release:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create git tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ needs.version.outputs.tag }}
+          git push origin ${{ needs.version.outputs.tag }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: CLI ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            artifacts/semantics-win-x64.exe/*
+            artifacts/semantics-linux-x64/*
+            artifacts/semantics-osx-x64/*
+            artifacts/semantics-osx-arm64/*

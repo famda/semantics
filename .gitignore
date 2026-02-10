@@ -206,6 +206,20 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
+# C# / .NET
+bin/
+obj/
+publish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.nupkg
+*.snupkg
+project.nuget.cache
+[Dd]ebug/
+[Rr]elease/
+
 # volumes
 .data/
 
