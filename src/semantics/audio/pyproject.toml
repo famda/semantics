@@ -36,4 +36,5 @@ full = [
     "torch<2.9",
     "torchaudio<2.9",
     "transformers>=4.57.0",
+    "yt-dlp",
 ]

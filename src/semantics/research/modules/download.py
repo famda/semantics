@@ -24,7 +24,7 @@ def _get_download_defaults() -> dict:
         # Fallback defaults if config import fails
         return {
             "filename_template": "%(title)s_%(id)s.%(ext)s",
-            "max_height": 720,
+            "max_height": 360,
         }
 
 

@@ -43,8 +43,14 @@ crawl:
 download:
   # yt-dlp output filename template
   filename_template: "%(title)s_%(id)s.%(ext)s"
-  # Maximum video height in pixels (360, 480, 720, 1080, etc.)
-  max_height: 720
+  # Maximum video height in pixels.
+  # Quality labels:
+  #   Full HD (1080p) = 1920x1080
+  #   HD     ( 720p) = 1280x720
+  #   SD     ( 480p) =  854x480
+  #   SD     ( 360p) =  640x360   <- default
+  #   SD     ( 240p) =  426x240
+  max_height: 360
   # Prefer free codecs (VP9, Opus) when available
   prefer_free_formats: true
 

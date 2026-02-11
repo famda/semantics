@@ -1,16 +1,9 @@
-"""Video download module.
+"""Audio download module.
 
-Downloads video from YouTube/web URLs using yt-dlp, respecting a
-configurable maximum resolution. The downloaded file is saved to the
+Downloads audio from YouTube/web URLs using yt-dlp, prioritising the
+best available audio stream. The downloaded file is saved to the
 specified output folder and replaces the input path for all downstream
-modules.
-
-Quality labels (height -> resolution):
-    Full HD (1080p) -- 1920x1080
-    HD     ( 720p) -- 1280x720
-    SD     ( 480p) --  854x480
-    SD     ( 360p) --  640x360   <- default
-    SD     ( 240p) --  426x240
+modules (slice, resample, etc.).
 """
 
 from __future__ import annotations
@@ -28,7 +21,6 @@ if TYPE_CHECKING:
 __all__ = ["handle"]
 
 DEFAULT_FILENAME_TEMPLATE = "%(title)s_%(id)s.%(ext)s"
-DEFAULT_MAX_HEIGHT = 360
 
 
 # ---------------------------------------------------------------------------
@@ -43,13 +35,13 @@ def handle(
     *,
     debug: bool = False,
 ) -> Tuple[str, str]:
-    """Download a video from a URL.
+    """Download audio from a URL.
 
     Args:
         input_file: URL to download (YouTube, etc.).
         output_folder: Directory where the file is saved.
-        config: Optional ``DownloadConfig`` with *max_height* and
-            *filename_template* overrides.
+        config: Optional ``DownloadConfig`` with *filename_template*
+            override.
         debug: When *True*, enable verbose yt-dlp logging.
 
     Returns:
@@ -58,18 +50,16 @@ def handle(
     Raises:
         RuntimeError: On download failure.
     """
-    max_height = config.max_height if config else DEFAULT_MAX_HEIGHT
     filename_template = (
         config.filename_template if config else DEFAULT_FILENAME_TEMPLATE
     )
 
-    info_print(f"Downloading video ({max_height}p max)")
+    info_print("Downloading audio")
 
     return _download(
         input_file,
         output_folder,
         filename_template=filename_template,
-        max_height=max_height,
         debug=debug,
     )
 
@@ -84,7 +74,6 @@ def _download(
     output_folder: str,
     *,
     filename_template: str,
-    max_height: int,
     debug: bool,
 ) -> Tuple[str, str]:
     """Download media from *url* into *output_folder*.
@@ -95,19 +84,12 @@ def _download(
     absolute_output = os.path.abspath(output_folder)
     os.makedirs(absolute_output, exist_ok=True)
 
-    options = _build_options(absolute_output, filename_template, max_height, debug)
+    options = _build_options(absolute_output, filename_template, debug)
 
-    # First attempt -- DASH (separate video+audio, merged by ffmpeg)
     try:
         info_dict = _run_download(url, options)
-    except yt_dlp.utils.DownloadError:
-        # Fallback to progressive stream (single file, no merge)
-        info_print("Retrying with progressive format")
-        options["format"] = _fallback_format(max_height)
-        try:
-            info_dict = _run_download(url, options)
-        except yt_dlp.utils.DownloadError as exc:
-            raise RuntimeError(f"Download failed: {exc}") from exc
+    except yt_dlp.utils.DownloadError as exc:
+        raise RuntimeError(f"Download failed: {exc}") from exc
 
     final_path = _resolve_path(info_dict)
     if not final_path or not os.path.exists(final_path):
@@ -122,18 +104,11 @@ def _download(
 def _build_options(
     output_folder: str,
     filename_template: str,
-    max_height: int,
     debug: bool,
 ) -> dict:
     """Build yt-dlp options dict."""
-    fmt = (
-        f"bestvideo[height<={max_height}]+bestaudio/best[height<={max_height}]"
-        if max_height
-        else "bestvideo+bestaudio/best"
-    )
-
     options: dict = {
-        "format": fmt,
+        "format": "bestaudio/best",
         "noplaylist": True,
         "outtmpl": os.path.join(output_folder, filename_template),
         "js_runtimes": {"node": {}},
@@ -175,13 +150,6 @@ def _make_progress_hook():
             )
 
     return _hook
-
-
-def _fallback_format(max_height: int) -> str:
-    """Progressive-only format selector."""
-    if max_height:
-        return f"best[height<={max_height}]"
-    return "best"
 
 
 def _run_download(url: str, options: dict) -> dict:

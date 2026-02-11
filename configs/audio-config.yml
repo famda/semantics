@@ -27,6 +27,25 @@ enhance:
   enabled: false
 
 # ----------------------------------------------------------------------------
+# Slice Configuration
+# ----------------------------------------------------------------------------
+# Time-range extraction settings.
+# Timestamps are provided via --slice-start / --slice-end CLI flags.
+slice:
+  # FFmpeg codec: 'copy' for stream-copy (fastest) or a specific codec name
+  codec: copy
+  # Re-encode automatically when stream-copy fails
+  fallback_reencode: true
+
+# ----------------------------------------------------------------------------
+# Download Configuration
+# ----------------------------------------------------------------------------
+# Settings for downloading audio from YouTube/web URLs.
+download:
+  # yt-dlp filename template for downloaded audio
+  filename_template: "%(title)s_%(id)s.%(ext)s"
+
+# ----------------------------------------------------------------------------
 # Stem Separation Configuration
 # ----------------------------------------------------------------------------
 # Source separation using Demucs to extract vocals from background audio.

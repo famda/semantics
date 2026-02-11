@@ -449,6 +449,38 @@ class NerConfig(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Slice Config
+# ---------------------------------------------------------------------------
+
+
+class SliceConfig(BaseModel):
+    """Configuration for media slicing (time-range extraction)."""
+
+    codec: str = Field(
+        default="copy",
+        description="FFmpeg codec: 'copy' for stream-copy (fastest) or a specific codec name.",
+    )
+    fallback_reencode: bool = Field(
+        default=True,
+        description="Re-encode automatically when stream-copy fails.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Download Config
+# ---------------------------------------------------------------------------
+
+
+class DownloadConfig(BaseModel):
+    """Configuration for audio downloading from URLs."""
+
+    filename_template: str = Field(
+        default="%(title)s_%(id)s.%(ext)s",
+        description="yt-dlp filename template for downloaded audio.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Root Audio Config
 # ---------------------------------------------------------------------------
 
@@ -456,6 +488,8 @@ class NerConfig(BaseModel):
 class AudioConfig(BaseModel):
     """Root configuration for the audio CLI."""
 
+    slice: SliceConfig = Field(default_factory=SliceConfig)
+    download: DownloadConfig = Field(default_factory=DownloadConfig)
     resample: ResampleConfig = Field(default_factory=ResampleConfig)
     enhance: EnhanceConfig = Field(default_factory=EnhanceConfig)
     stem: StemConfig = Field(default_factory=StemConfig)

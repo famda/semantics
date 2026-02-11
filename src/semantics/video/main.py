@@ -72,6 +72,8 @@ def _coerce_int(value) -> Optional[int]:
 @click.option("--debug", is_flag=True, help="Enable verbose debug logging")
 @click.option("--plain", is_flag=True, help="Disable rich formatting, use plain text output")
 @click.option("--config", type=click.Path(exists=True), default=None, help="Path to YAML config file")
+@click.option("--slice-start", type=str, default=None, help="Start timestamp for slicing (HH:MM:SS or HH:MM:SS.mmm)")
+@click.option("--slice-end", type=str, default=None, help="End timestamp for slicing (HH:MM:SS or HH:MM:SS.mmm)")
 def main(
     input_file: str,
     output_folder: str,
@@ -95,6 +97,8 @@ def main(
     debug: bool,
     plain: bool,
     config: Optional[str],
+    slice_start: Optional[str],
+    slice_end: Optional[str],
 ) -> None:
     """
     \b
@@ -112,6 +116,7 @@ def main(
         reset_timings,
         run_module,
         set_debug,
+        set_input_subtitle,
         set_plain,
         skip_module,
         install_abort_handler,
@@ -163,42 +168,35 @@ def main(
         from config import VideoConfig
         video_config = VideoConfig()
 
-    # Create output directories
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-        os.makedirs(os.path.join(output_folder, "temp"))
-
-    # Handle YouTube/URL downloads
+    # Detect URL input
     file = input_file
-    if file.startswith("https://www.youtube.com/watch?v=") or file.startswith("https://youtu.be/"):
-        from modules import download as downloader
+    is_url = file.startswith("https://www.youtube.com/watch?v=") or file.startswith("https://youtu.be/")
 
-        download_cfg = video_config.download if video_config else None
-        max_height = download_resolution
-        if max_height is None and download_cfg:
-            max_height = download_cfg.max_height
-        downloaded = downloader.handle(input_file, output_folder, download_cfg)
-        if not downloaded:
-            click.echo(f"Error: Failed to download video from {input_file}", err=True)
-            sys.exit(1)
-        file = downloaded
-    else:
+    if not is_url:
         if not os.path.exists(input_file):
             click.echo(f"Error: The file {input_file} does not exist.", err=True)
             sys.exit(1)
 
+    # Create output directories
+    os.makedirs(output_folder, exist_ok=True)
     temp_folder = os.path.join(output_folder, "temp")
-    file_type = file.split(".")[-1].lower()
+    os.makedirs(temp_folder, exist_ok=True)
 
-    if file_type not in VIDEO_FILE_TYPES:
-        click.echo(f"Error: The file {file} is not a supported video file type.", err=True)
-        sys.exit(1)
+    if not is_url:
+        file_type = file.split(".")[-1].lower()
+        if file_type not in VIDEO_FILE_TYPES:
+            click.echo(f"Error: The file {file} is not a supported video file type.", err=True)
+            sys.exit(1)
 
     configure_external_logging(debug)
     print_header("video", file)
 
     # Build planned module list
     planned: list[str] = []
+    if is_url:
+        planned.append("Download")
+    if slice_start or slice_end:
+        planned.append("Slice")
     if from_frames:
         planned.append("Frame Extraction")
     elif from_segments:
@@ -234,6 +232,39 @@ def main(
     selection_mode: str | None = None
 
     try:
+        # Download from URL if needed
+        if is_url:
+            from modules import download as downloader
+
+            download_cfg = video_config.download if video_config else None
+            # CLI --download-resolution overrides config
+            if download_resolution is not None:
+                from config import DownloadConfig
+                base = download_cfg or DownloadConfig()
+                download_cfg = base.model_copy(update={"max_height": download_resolution})
+            file, _ = run_module(
+                "Download", downloader.handle,
+                input_file, output_folder, config=download_cfg, debug=debug,
+            )
+            if not file:
+                return  # Download failed (already recorded in summary)
+            # Unpack (path, title) tuple from download handle
+            if isinstance(file, tuple):
+                file, video_title = file
+                if video_title:
+                    set_input_subtitle(video_title)
+
+        # Slice video to requested time range
+        if slice_start or slice_end:
+            from modules import slice as slicer
+
+            slice_cfg = video_config.slice if video_config else None
+            file, _ = run_module(
+                "Slice", slicer.handle,
+                file, temp_folder, config=slice_cfg,
+                start_time=slice_start, end_time=slice_end, debug=debug,
+            )
+
         # Extract frames based on selected mode
         if from_frames:
             selection_mode = "frames"

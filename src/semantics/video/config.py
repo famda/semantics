@@ -13,11 +13,19 @@ from pydantic import BaseModel, Field
 
 
 class DownloadConfig(BaseModel):
-    """Configuration for YouTube/URL video downloading."""
+    """Configuration for YouTube/URL video downloading.
+
+    Quality labels (height -> resolution):
+        Full HD (1080p) -- 1920x1080
+        HD     ( 720p) -- 1280x720
+        SD     ( 480p) --  854x480
+        SD     ( 360p) --  640x360   <- default
+        SD     ( 240p) --  426x240
+    """
 
     max_height: int = Field(
-        default=720,
-        description="Maximum video height (e.g., 360, 720, 1080) when downloading from a URL.",
+        default=360,
+        description="Maximum video height in pixels (e.g., 240, 360, 480, 720, 1080).",
     )
     filename_template: str = Field(
         default="%(title)s_%(id)s.%(ext)s",
@@ -390,9 +398,26 @@ class NerConfig(BaseModel):
     )
 
 
+class SliceConfig(BaseModel):
+    """Configuration for video slicing (time-range extraction)."""
+
+    codec: str = Field(
+        default="copy",
+        description="FFmpeg codec: 'copy' for stream-copy (fastest) or a specific codec name.",
+    )
+    fallback_reencode: bool = Field(
+        default=True,
+        description="Re-encode automatically when stream-copy fails.",
+    )
+
+
 class VideoConfig(BaseModel):
     """Root configuration for all video processing modules."""
 
+    slice: SliceConfig = Field(
+        default_factory=SliceConfig,
+        description="Media slicing (time-range extraction) settings.",
+    )
     download: DownloadConfig = Field(
         default_factory=DownloadConfig,
         description="YouTube/URL download settings.",

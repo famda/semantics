@@ -167,6 +167,21 @@ def debug_print(message: str, *, debug: bool) -> None:
         _get_console().print(f"  [dim]{message}[/dim]")
 
 
+def _is_url(path: str) -> bool:
+    """Return True if *path* looks like a URL."""
+    return path.startswith("http://") or path.startswith("https://")
+
+
+def _display_input(path: str) -> str:
+    """Return the display string for an input path.
+
+    URLs are shown in full; local files show only the basename.
+    """
+    if _is_url(path):
+        return path
+    return os.path.basename(path)
+
+
 def print_header(cli_name: str, input_path: str = "") -> None:
     """Print a styled CLI header banner.
 
@@ -178,7 +193,7 @@ def print_header(cli_name: str, input_path: str = "") -> None:
         print("=" * 55)
         print(f"  Semantics [{cli_name}]")
         if input_path:
-            print(f"  Input: {os.path.basename(input_path)}")
+            print(f"  Input: {_display_input(input_path)}")
         print("=" * 55)
         print()
     else:
@@ -189,7 +204,7 @@ def print_header(cli_name: str, input_path: str = "") -> None:
             style="cyan",
         )
         if _debug_mode and input_path:
-            console.print(f"  [dim]Input:[/dim] {os.path.basename(input_path)}")
+            console.print(f"  [dim]Input:[/dim] {_display_input(input_path)}")
         console.print()
 
 
@@ -349,6 +364,7 @@ class PipelineLive:
         self._completed = 0
         self._cli_name = cli_name
         self._input_path = input_path
+        self._input_subtitle = ""
         self._live = None
         self._progress = None
         self._task_id = None
@@ -451,11 +467,16 @@ class PipelineLive:
             header = Table.grid(expand=True)
             header.add_column(ratio=1)
             header.add_column(justify="right")
-            left = f"  [dim]Input:[/dim] {os.path.basename(self._input_path)}"
+            left = f"  [dim]Input:[/dim] {_display_input(self._input_path)}"
             # Hide resource stats from the final persisted view
             right = "" if self._stopping else self._monitor.format_rich()
             header.add_row(left, right)
             parts.append(header)
+            # Subtitle (e.g. video title) below the input line
+            if self._input_subtitle:
+                parts.append(
+                    Text.from_markup(f"  [dim]Title:[/dim] {self._input_subtitle}")
+                )
 
         # Blank line between header and progress bar
         if self._input_path and self._progress is not None:
@@ -568,6 +589,14 @@ class PipelineLive:
         elif _plain_mode:
             print(f"  [{self._completed}/{self._total}]")
 
+    def set_input_subtitle(self, subtitle: str) -> None:
+        """Set a subtitle line shown below the input path (e.g. video title)."""
+        self._input_subtitle = subtitle
+
+    def update_input_path(self, new_path: str) -> None:
+        """Replace the displayed input path (e.g. after resolving a URL)."""
+        self._input_path = new_path
+
     # -- internals -----------------------------------------------------------
 
     def _refresh(self) -> None:
@@ -590,6 +619,27 @@ def stop_pipeline() -> None:
         _pipeline_live = None
 
 
+def set_input_subtitle(subtitle: str) -> None:
+    """Set a subtitle (e.g. video title) shown below the input path.
+
+    In plain/debug mode the subtitle is printed immediately.
+    In rich mode it is stored on PipelineLive so the live display
+    renders it on the next refresh.
+    """
+    if _pipeline_live is not None:
+        _pipeline_live.set_input_subtitle(subtitle)
+    if _plain_mode and subtitle:
+        print(f"  Title: {subtitle}")
+    elif _debug_mode and subtitle:
+        _get_console().print(f"  [dim]Title:[/dim] {subtitle}")
+
+
+def update_input_path(new_path: str) -> None:
+    """Replace the displayed input path in the live display."""
+    if _pipeline_live is not None:
+        _pipeline_live.update_input_path(new_path)
+
+
 def update_sub_progress(current: int, total: int, unit: str = "") -> None:
     """Update a sub-progress counter on the active module.
 
@@ -597,13 +647,14 @@ def update_sub_progress(current: int, total: int, unit: str = "") -> None:
     the config sub-messages.  In plain / debug mode a periodic line is
     printed (every 10 % or every final item).
     """
-    if _pipeline_live is not None:
+    if _pipeline_live is not None and not _plain_mode and not _debug_mode:
         _pipeline_live.update_sub_progress(current, total, unit)
-    elif _plain_mode and total > 0:
+    elif (_plain_mode or _debug_mode) and total > 0:
         # Print a progress dot every ~10 % to keep the user informed
         step = max(1, total // 10)
         if current % step == 0 or current == total:
-            print(f"    [{current}/{total}]", flush=True)
+            suffix = f" {unit}" if unit else ""
+            print(f"    [{current}/{total}{suffix}]", flush=True)
 
 
 # ---------------------------------------------------------------------------

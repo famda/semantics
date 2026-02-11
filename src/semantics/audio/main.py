@@ -47,8 +47,8 @@ except Exception as e:
     "--input",
     "input_file",
     required=True,
-    type=click.Path(exists=False),
-    help="Input media file",
+    type=str,
+    help="Input media file or YouTube URL",
 )
 @click.option(
     "-o",
@@ -91,6 +91,8 @@ except Exception as e:
     default=None,
     help="Path to YAML config file",
 )
+@click.option("--slice-start", type=str, default=None, help="Start timestamp for slicing (HH:MM:SS or HH:MM:SS.mmm)")
+@click.option("--slice-end", type=str, default=None, help="End timestamp for slicing (HH:MM:SS or HH:MM:SS.mmm)")
 def main(
     input_file: str,
     output_folder: str,
@@ -110,6 +112,8 @@ def main(
     debug: bool,
     plain: bool,
     config: Optional[str],
+    slice_start: Optional[str],
+    slice_end: Optional[str],
 ) -> None:
     """
     \b
@@ -124,6 +128,7 @@ def main(
         reset_timings,
         run_module,
         set_debug,
+        set_input_subtitle,
         set_plain,
         skip_module,
         install_abort_handler,
@@ -151,31 +156,39 @@ def main(
         from config import AudioConfig
         audio_config = AudioConfig()
 
-    # Validate input file exists
-    if not os.path.exists(input_file):
-        click.echo(f"Error: The file {input_file} does not exist.", err=True)
-        sys.exit(1)
+    # Detect URL input
+    is_url = input_file.startswith("https://www.youtube.com/watch?v=") or input_file.startswith("https://youtu.be/")
+
+    if not is_url:
+        # Validate input file exists
+        if not os.path.exists(input_file):
+            click.echo(f"Error: The file {input_file} does not exist.", err=True)
+            sys.exit(1)
 
     # Create output directories
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
-        os.makedirs(os.path.join(output_folder, "temp"))
-
+    os.makedirs(output_folder, exist_ok=True)
     temp_folder = os.path.join(output_folder, "temp")
-    file_type = input_file.split(".")[-1].lower()
+    os.makedirs(temp_folder, exist_ok=True)
 
-    SUPPORTED_FILE_TYPES = AUDIO_FILE_TYPES + VIDEO_FILE_TYPES
-    if file_type not in SUPPORTED_FILE_TYPES:
-        click.echo(
-            f"Error: The file {input_file} is not a supported file type.", err=True
-        )
-        sys.exit(1)
+    if not is_url:
+        file_type = input_file.split(".")[-1].lower()
+        SUPPORTED_FILE_TYPES = AUDIO_FILE_TYPES + VIDEO_FILE_TYPES
+        if file_type not in SUPPORTED_FILE_TYPES:
+            click.echo(
+                f"Error: The file {input_file} is not a supported file type.", err=True
+            )
+            sys.exit(1)
 
     configure_external_logging(debug)
     print_header("audio", input_file)
 
     # Build planned module list
-    planned = ["Resample"]
+    planned = []
+    if is_url:
+        planned.append("Download")
+    if slice_start or slice_end:
+        planned.append("Slice")
+    planned.append("Resample")
     if stem:
         planned.append("Source Separation")
     if enhance_audio:
@@ -208,6 +221,32 @@ def main(
     install_abort_handler()
 
     try:
+        # Download from URL if needed
+        if is_url:
+            from modules import download as downloader
+
+            download_cfg = audio_config.download if audio_config else None
+            download_result, _ = run_module(
+                "Download", downloader.handle,
+                input_file, output_folder, config=download_cfg, debug=debug,
+            )
+            if not download_result:
+                return  # Download failed (already recorded in summary)
+            input_file, video_title = download_result
+            if video_title:
+                set_input_subtitle(video_title)
+
+        # Slice media to requested time range (before resampling)
+        if slice_start or slice_end:
+            from modules import slice as slicer
+
+            slice_cfg = audio_config.slice if audio_config else None
+            input_file, _ = run_module(
+                "Slice", slicer.handle,
+                input_file, temp_folder, config=slice_cfg,
+                start_time=slice_start, end_time=slice_end, debug=debug,
+            )
+
         # Resample audio to standard format
         if os.path.exists(os.path.join(temp_folder, "audio.wav")):
             audio_file = os.path.join(temp_folder, "audio.wav")

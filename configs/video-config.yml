@@ -8,12 +8,29 @@
 # Download Configuration (YouTube/URL downloads)
 # -----------------------------------------------------------------------------
 download:
-  # Maximum video height when downloading from URLs (e.g., 360, 720, 1080)
-  max_height: 720
+  # Maximum video height when downloading from URLs.
+  # Quality labels:
+  #   Full HD (1080p) = 1920x1080
+  #   HD     ( 720p) = 1280x720
+  #   SD     ( 480p) =  854x480
+  #   SD     ( 360p) =  640x360   <- default
+  #   SD     ( 240p) =  426x240
+  max_height: 360
 
   # yt-dlp filename template for downloaded videos
   # See: https://github.com/yt-dlp/yt-dlp#output-template
   filename_template: "%(title)s_%(id)s.%(ext)s"
+
+# -----------------------------------------------------------------------------
+# Slice Configuration
+# -----------------------------------------------------------------------------
+# Time-range extraction settings.
+# Timestamps are provided via --slice-start / --slice-end CLI flags.
+slice:
+  # FFmpeg codec: 'copy' for stream-copy (fastest) or a specific codec name
+  codec: copy
+  # Re-encode automatically when stream-copy fails
+  fallback_reencode: true
 
 # -----------------------------------------------------------------------------
 # Frame Extraction Configuration

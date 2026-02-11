@@ -62,14 +62,22 @@ class CrawlConfig(BaseModel):
 
 
 class DownloadConfig(BaseModel):
-    """Configuration for video downloads (yt-dlp)."""
+    """Configuration for video downloads (yt-dlp).
+
+    Quality labels (height -> resolution):
+        Full HD (1080p) -- 1920x1080
+        HD     ( 720p) -- 1280x720
+        SD     ( 480p) --  854x480
+        SD     ( 360p) --  640x360   <- default
+        SD     ( 240p) --  426x240
+    """
 
     filename_template: str = Field(
         default="%(title)s_%(id)s.%(ext)s",
         description="yt-dlp output filename template",
     )
     max_height: int = Field(
-        default=720, description="Maximum video height in pixels"
+        default=360, description="Maximum video height in pixels (e.g., 240, 360, 480, 720, 1080)"
     )
     prefer_free_formats: bool = Field(
         default=True, description="Prefer free codecs (VP9, Opus) when available"

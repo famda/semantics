@@ -45,6 +45,7 @@ from ui import (  # noqa: F401 — re-exported
     restore_abort_handler,
     run_module,
     set_debug,
+    set_input_subtitle,
     set_plain,
     skip_module,
     start_pipeline,
