@@ -86,10 +86,18 @@ def _download(
 
     options = _build_options(absolute_output, filename_template, debug)
 
+    # Attempt 1 — audio-only DASH stream
     try:
         info_dict = _run_download(url, options)
-    except yt_dlp.utils.DownloadError as exc:
-        raise RuntimeError(f"Download failed: {exc}") from exc
+    except yt_dlp.utils.DownloadError:
+        # Attempt 2 — progressive stream (single file with video+audio;
+        # downstream resample will extract the audio track).
+        info_print("Retrying with progressive format")
+        options["format"] = "best"
+        try:
+            info_dict = _run_download(url, options)
+        except yt_dlp.utils.DownloadError as exc:
+            raise RuntimeError(f"Download failed: {exc}") from exc
 
     final_path = _resolve_path(info_dict)
     if not final_path or not os.path.exists(final_path):

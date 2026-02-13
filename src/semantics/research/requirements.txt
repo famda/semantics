@@ -21,7 +21,7 @@ beautifulsoup4>=4.14.3
 lxml>=5.4.0
 
 # Video Download
-yt-dlp>=2025.9.26
+yt-dlp>=2026.1.29
 
 # Document Processing
 unstructured[md]>=0.18

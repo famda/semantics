@@ -1124,6 +1124,45 @@ def _generate_srt(segments: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _save_segment_audio_files(
+    input_file: str,
+    output_folder: str,
+    segments: List[Dict[str, Any]],
+    debug: bool,
+) -> None:
+    """Cut segment audio files from the source and save to segments/ folder."""
+    transcription_folder = os.path.join(output_folder, "transcription_experimental")
+    segments_dir = os.path.join(transcription_folder, "segments")
+    if os.path.exists(segments_dir):
+        import shutil
+        shutil.rmtree(segments_dir)
+    os.makedirs(segments_dir, exist_ok=True)
+
+    waveform, sample_rate = sf.read(input_file, dtype="float32")
+    debug_print(
+        f"Saving {len(segments)} segment audio files to {segments_dir}", debug=debug
+    )
+
+    for seg in segments:
+        seg_id = seg.get("id", 0)
+        start_sec = seg.get("start", 0.0)
+        end_sec = seg.get("end", 0.0)
+        if end_sec <= start_sec:
+            continue
+
+        start_sample = max(0, int(round(start_sec * sample_rate)))
+        end_sample = min(len(waveform), int(round(end_sec * sample_rate)))
+        if end_sample <= start_sample:
+            continue
+
+        segment_waveform = waveform[start_sample:end_sample]
+        target_path = os.path.join(segments_dir, f"{seg_id}.wav")
+        try:
+            sf.write(target_path, segment_waveform, sample_rate)
+        except Exception as exc:
+            debug_print(f"Failed to write segment {seg_id}: {exc}", debug=debug)
+
+
 def _save_outputs(
     output_folder: str,
     result: Dict[str, Any],
@@ -1164,6 +1203,7 @@ def handle(
     output_folder: str,
     config: Optional["TranscribeExperimentalConfig"] = None,
     *,
+    save_segments: bool = False,
     debug: bool = False,
 ) -> Tuple[Dict[str, Any], str]:
     """Main entry point for experimental transcription.
@@ -1176,6 +1216,7 @@ def handle(
         input_file: Path to the audio file.
         output_folder: Path to output directory.
         config: TranscribeExperimentalConfig instance or None for defaults.
+        save_segments: Save each transcript segment as an individual WAV file.
         debug: Enable verbose debug output.
 
     Returns:
@@ -1186,8 +1227,6 @@ def handle(
     )
 
     # Extract config values using defaults helper (per REFACTORING_PRINCIPLES.md)
-    defaults = _get_transcribe_experimental_defaults()
-    
     if config:
         settings = _TranscribeSettings(
             model=config.model,
@@ -1261,9 +1300,16 @@ def handle(
     # Save outputs
     _save_outputs(output_folder, result, full_text, debug)
 
+    # Save segment audio files when requested
+    if save_segments:
+        _save_segment_audio_files(
+            input_file, output_folder, result.get("segments", []), debug
+        )
+
     total_time = result["performance"].get("transcription_seconds", 0.0)
     total_time += result["performance"].get("ctc_alignment_seconds", 0.0)
     total_time += result["performance"].get("diarization_seconds", 0.0)
     debug_print(f"Experimental transcription completed in {total_time:.2f} seconds", debug=debug)
 
     return result, full_text
+

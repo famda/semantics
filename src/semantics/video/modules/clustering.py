@@ -6,10 +6,9 @@ import os
 import shutil
 import queue
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor, wait
-from contextlib import contextmanager, nullcontext
-from typing import Iterable, List, Optional, Tuple, TYPE_CHECKING, Any
+from contextlib import nullcontext
+from typing import List, Optional, Tuple, TYPE_CHECKING, Any
 
 import cv2 as _cv
 import numpy as np
@@ -50,7 +49,7 @@ def _probe_frame_indices(video_file: str, sample_fps: float) -> List[int]:
     return list(range(0, total_frames, step))
 
 
-class AsyncVideoLoader:
+class _AsyncVideoLoader:
     """
     Reads video frames in a separate thread, applies transforms in parallel workers,
     and feeds a queue for the GPU consumer.
@@ -104,7 +103,7 @@ class AsyncVideoLoader:
                 current_pos = target_idx
                 
                 if not ret:
-                    break
+                    continue
                 
                 batch_frames.append(frame)
                 batch_indices.append(target_idx)
@@ -266,7 +265,7 @@ def _cluster_frames(
 
     # --- Step 2: Pipelined Feature Extraction ---
     # The AsyncVideoLoader handles IO and CPU transform in background threads
-    loader = AsyncVideoLoader(video_file, frame_numbers, BATCH_SIZE, transform, dev)
+    loader = _AsyncVideoLoader(video_file, frame_numbers, BATCH_SIZE, transform, dev)
     loader.start()
 
     selected_indices: List[int] = []
@@ -622,7 +621,7 @@ def _cluster_frames(
                             try:
                                 if os.path.exists(src):
                                     shutil.copy2(src, dst)
-                            except: pass
+                            except Exception: pass
                         else:
                             # Fallback: Read specific frame (rare case)
                             try:

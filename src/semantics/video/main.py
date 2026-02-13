@@ -24,7 +24,7 @@ try:
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
 
-    from global_helpers import VIDEO_FILE_TYPES, select_frame_indices
+    from global_helpers import VIDEO_FILE_TYPES, select_frame_indices, coerce_int
 
 except ImportError as e:
     print(f"\n****** ERROR: Failed to import required modules ******", file=sys.stderr)
@@ -36,17 +36,6 @@ except Exception as e:
     sys.exit(1)
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-
-
-def _coerce_int(value) -> Optional[int]:
-    """Convert value to int, handling floats and None."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return None
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"]})
@@ -273,7 +262,7 @@ def main(
 
             frames_cfg = video_config.frames if video_config else None
             if frames_cfg and frames_per_second is not None:
-                frames_cfg.target_fps = frames_per_second
+                frames_cfg = frames_cfg.model_copy(update={"target_fps": frames_per_second})
             elif frames_cfg is None and frames_per_second is not None:
                 from config import FramesConfig
                 frames_cfg = FramesConfig(target_fps=frames_per_second)
@@ -324,13 +313,13 @@ def main(
                 for pos in positions:
                     if 0 <= pos < len(frame_data):
                         entry = frame_data[pos]
-                        idx = _coerce_int(entry.get("index", pos) if isinstance(entry, dict) else pos)
+                        idx = coerce_int(entry.get("index", pos) if isinstance(entry, dict) else pos)
                         if idx is not None:
                             collected.append(idx)
             elif selection_mode == "segments":
                 for entry in frame_data:
                     if isinstance(entry, dict):
-                        idx = _coerce_int(entry.get("index"))
+                        idx = coerce_int(entry.get("index"))
                         if idx is not None:
                             collected.append(idx)
             elif selection_mode == "clustering":
@@ -338,7 +327,7 @@ def main(
                     if isinstance(entry, dict):
                         if entry.get("keyframe") is False:
                             continue
-                        idx = _coerce_int(entry.get("index") or entry.get("frame_index"))
+                        idx = coerce_int(entry.get("index") or entry.get("frame_index"))
                         if idx is not None:
                             collected.append(idx)
             if collected:

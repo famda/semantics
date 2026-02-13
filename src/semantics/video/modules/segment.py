@@ -15,7 +15,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, TYPE_CHECKING
-import os
 
 if TYPE_CHECKING:
     from config import SegmentsConfig as SegmentsConfigType
@@ -33,16 +32,18 @@ except ImportError as exc:  # pragma: no cover - dependency guard
 
 from .utils.logging import debug_print, info_print
 
+__all__ = ["handle"]
+
 
 @dataclass(frozen=True)
-class SegmentConfig:
+class _SegmentConfig:
     include_last_frame: bool = True
     debug: bool = False
     target_detection_fps: Optional[float] = 12.0
 
 
 @dataclass(frozen=True)
-class SceneSummary:
+class _SceneSummary:
     scene_id: int
     start_frame: int
     end_frame: int
@@ -52,9 +53,9 @@ class SceneSummary:
 
 
 @dataclass(frozen=True)
-class SegmentArtifacts:
+class _SegmentArtifacts:
     representative_indices: List[int]
-    scenes: List[SceneSummary]
+    scenes: List[_SceneSummary]
     sampled_indices: List[int]
     total_frames: int
     fps: float
@@ -62,8 +63,8 @@ class SegmentArtifacts:
     frame_skip: int
 
 
-def segment_video(video_path: str, *, config: Optional[SegmentConfig] = None) -> SegmentArtifacts:
-    cfg = config or SegmentConfig()
+def _segment_video(video_path: str, *, config: Optional[_SegmentConfig] = None) -> _SegmentArtifacts:
+    cfg = config or _SegmentConfig()
 
     total_frames, fps = _probe_video_stats(video_path)
     duration = (total_frames / fps) if (fps > 0.0 and total_frames > 0) else 0.0
@@ -100,7 +101,7 @@ def segment_video(video_path: str, *, config: Optional[SegmentConfig] = None) ->
         debug=cfg.debug,
     )
 
-    return SegmentArtifacts(
+    return _SegmentArtifacts(
         representative_indices=keyframes,
         scenes=summaries,
         sampled_indices=keyframes.copy(),
@@ -173,14 +174,14 @@ def _detect_scene_boundaries(
 def _summarize_scenes(
     boundaries: Sequence[Tuple[FrameTimecode, FrameTimecode]],
     fps: float,
-) -> List[SceneSummary]:
+) -> List[_SceneSummary]:
     durations = [
         max(end.get_seconds() - start.get_seconds(), 1.0 / max(fps, 1.0))
         for start, end in boundaries
     ]
 
     base_span = _derive_base_span(durations)
-    summaries: List[SceneSummary] = []
+    summaries: List[_SceneSummary] = []
 
     for scene_id, (start_tc, end_tc) in enumerate(boundaries):
         start_frame = start_tc.get_frames()
@@ -193,7 +194,7 @@ def _summarize_scenes(
         frames = _distribute_frames(start_frame, end_frame, frame_count)
 
         summaries.append(
-            SceneSummary(
+            _SceneSummary(
                 scene_id=scene_id,
                 start_frame=start_frame,
                 end_frame=end_frame,
@@ -289,16 +290,23 @@ def _export_frames(
     fps = artifacts.fps if artifacts.fps > 0.0 else getattr(video, "frame_rate", 30.0)
 
     # Process all frames in sorted order (single video pass)
+    failed_count = 0
     for frame_idx in sorted(frame_targets.keys()):
         timecode = FrameTimecode(frame_idx, fps)
         video.seek(timecode)
         frame = video.read()
         if frame is None:
+            failed_count += 1
             continue
         filename = f"frame_{frame_idx:08d}.{ext}"
         for target_dir, _ in frame_targets[frame_idx]:
             path = target_dir / filename
             _cv.imwrite(str(path), frame)
+
+    if failed_count > 0:
+        info_print(
+            f"Warning: failed to read {failed_count}/{len(frame_targets)} frames"
+        )
 
 
 def handle(
@@ -347,7 +355,7 @@ def _extract(
 
     info_print("Detecting representative video segments")
 
-    results_path =os.path.join(output_dir,"frames", "segments")
+    results_path = str(Path(output_dir) / "frames" / "segments")
 
     output_path = Path(results_path)
     scenes_dir = output_path / "scenes"
@@ -355,13 +363,13 @@ def _extract(
     for directory in (output_path, scenes_dir, flat_dir):
         directory.mkdir(parents=True, exist_ok=True)
 
-    config = SegmentConfig(
+    config = _SegmentConfig(
         include_last_frame=include_last_frame,
         debug=debug,
         target_detection_fps=target_detection_fps,
     )
 
-    artifacts = segment_video(video_path, config=config)
+    artifacts = _segment_video(video_path, config=config)
 
     fps = artifacts.fps if artifacts.fps > 0.0 else None
     frames_metadata: List[dict] = []
@@ -443,5 +451,3 @@ def _extract(
 
     return str(flat_dir), frames_metadata, str(segments_path)
 
-
-__all__ = ["handle"]

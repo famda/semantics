@@ -15,7 +15,7 @@ download:
   #   SD     ( 480p) =  854x480
   #   SD     ( 360p) =  640x360   <- default
   #   SD     ( 240p) =  426x240
-  max_height: 360
+  max_height: 480
 
   # yt-dlp filename template for downloaded videos
   # See: https://github.com/yt-dlp/yt-dlp#output-template

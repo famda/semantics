@@ -10,10 +10,12 @@ from __future__ import annotations
 import gc
 import json
 import os
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Tuple
 
+import soundfile as sf
 import torch
 from faster_whisper import WhisperModel
 
@@ -34,6 +36,7 @@ def handle(
     output_folder: str,
     config: "TranscribeConfig | None" = None,
     *,
+    save_segments: bool = False,
     debug: bool = False,
 ) -> tuple[dict, str]:
     """Transcribe an audio file to text.
@@ -42,6 +45,7 @@ def handle(
         input_file: Path to the input audio file.
         output_folder: Path to the output folder for results.
         config: TranscribeConfig with model and chunking settings.
+        save_segments: Save each transcript segment as an individual WAV file.
         debug: Enable verbose logging.
 
     Returns:
@@ -220,7 +224,48 @@ def handle(
             end_ts = _format_srt_time(seg["end"])
             f.write(f"{i + 1}\n{start_ts} --> {end_ts}\n{seg['text']}\n\n")
 
+    # Save segment audio files when requested
+    if save_segments and segments:
+        _save_segment_audio_files(input_file, transcription_folder, segments, debug)
+
     return result, full_text
+
+
+def _save_segment_audio_files(
+    input_file: str,
+    transcription_folder: str,
+    segments: List[dict],
+    debug: bool,
+) -> None:
+    """Cut segment audio files from the source and save to segments/ folder."""
+    segments_dir = os.path.join(transcription_folder, "segments")
+    if os.path.exists(segments_dir):
+        shutil.rmtree(segments_dir)
+    os.makedirs(segments_dir, exist_ok=True)
+
+    waveform, sample_rate = sf.read(input_file, dtype="float32")
+    debug_print(
+        f"Saving {len(segments)} segment audio files to {segments_dir}", debug=debug
+    )
+
+    for seg in segments:
+        seg_id = seg.get("id", 0)
+        start_sec = seg.get("start", 0.0)
+        end_sec = seg.get("end", 0.0)
+        if end_sec <= start_sec:
+            continue
+
+        start_sample = max(0, int(round(start_sec * sample_rate)))
+        end_sample = min(len(waveform), int(round(end_sec * sample_rate)))
+        if end_sample <= start_sample:
+            continue
+
+        segment_waveform = waveform[start_sample:end_sample]
+        target_path = os.path.join(segments_dir, f"{seg_id}.wav")
+        try:
+            sf.write(target_path, segment_waveform, sample_rate)
+        except Exception as exc:
+            debug_print(f"Failed to write segment {seg_id}: {exc}", debug=debug)
 
 
 def _split_audio_chunks(
@@ -318,3 +363,4 @@ def _format_srt_time(seconds: float) -> str:
     hrs, remainder = divmod(total_secs, 3600)
     mins, secs = divmod(remainder, 60)
     return f"{hrs:02}:{mins:02}:{secs:02},{ms:03}"
+

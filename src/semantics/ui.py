@@ -344,6 +344,55 @@ def get_resource_status() -> str:
 # Pipeline live display
 # ---------------------------------------------------------------------------
 
+
+class _ActiveModuleRenderable:
+    """Single-row renderable: spinner + module label + inline sub-progress.
+
+    Reads the latest ``_sub_current`` / ``_sub_total`` from the parent
+    ``PipelineLive`` on every Rich refresh tick so that sub-progress
+    updates appear immediately without setting the dirty flag or
+    rebuilding the outer ``Group``.
+    """
+
+    def __init__(self, label: str, pipeline: "PipelineLive"):
+        from rich.spinner import Spinner
+
+        self._spinner = Spinner("dots", text=f"  [bold]{label}[/bold]")
+        self._label = label
+        self._pipeline = pipeline
+        self._last_sub: tuple[int, int] = (-1, -1)
+
+    def __rich_console__(self, console, options):
+        from rich.text import Text
+
+        p = self._pipeline
+        cur, tot = p._sub_current, p._sub_total
+
+        # Only rebuild the spinner text when sub-progress actually changes
+        if (cur, tot) != self._last_sub:
+            self._last_sub = (cur, tot)
+            if tot > 0:
+                filled = int(20 * cur / tot)
+                empty = 20 - filled
+                bar = (
+                    f"[green]{'━' * filled}[/green]"
+                    f"[dim]{'━' * empty}[/dim]"
+                )
+                unit_str = f" {p._sub_unit}" if p._sub_unit else ""
+                pct = cur / tot * 100
+                self._spinner.text = Text.from_markup(
+                    f"  [bold]{self._label}[/bold]  "
+                    f"{bar} "
+                    f"[dim]{cur}/{tot}{unit_str} ({pct:.0f}%)[/dim]"
+                )
+            else:
+                self._spinner.text = Text.from_markup(
+                    f"  [bold]{self._label}[/bold]"
+                )
+
+        yield self._spinner
+
+
 class PipelineLive:
     """Unified live display: header row, progress bar, module results, active spinner.
 
@@ -372,7 +421,8 @@ class PipelineLive:
         self._errors: list[tuple[str, float, str]] = []  # (label, elapsed, error_msg)
         self._active_label: str = ""
         self._active_config: dict[str, Any] = {}
-        self._active_spinner = None  # reused Spinner instance
+        self._active_renderable: _ActiveModuleRenderable | None = None
+        self._active_config_renderables: list = []  # cached Text objects
         self._sub_current: int = 0
         self._sub_total: int = 0
         self._sub_unit: str = ""
@@ -381,6 +431,11 @@ class PipelineLive:
         self._tty_file = None
         self._console = None
         self._stopping: bool = False  # set True during final render
+        # Dirty-flag caching to prevent flashing: only rebuild the display
+        # when state actually changes instead of on every refresh tick.
+        self._dirty: bool = True
+        self._cached_display = None
+        self._last_resource_str: str = ""
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -416,7 +471,7 @@ class PipelineLive:
         self._live = Live(
             self,
             console=self._console,
-            refresh_per_second=4,
+            refresh_per_second=8,
             transient=False,
         )
         self._live.start()
@@ -426,7 +481,8 @@ class PipelineLive:
             try:
                 self._active_label = ""
                 self._active_config = {}
-                self._active_spinner = None
+                self._active_renderable = None
+                self._active_config_renderables = []
                 self._sub_current = self._sub_total = 0
                 self._stopping = True
                 if self._progress is not None and self._task_id is not None:
@@ -448,8 +504,26 @@ class PipelineLive:
     # -- Rich protocol -------------------------------------------------------
 
     def __rich_console__(self, console, options):
-        """Called by Rich.Live on every refresh to get the current renderable."""
-        yield self._build_display()
+        """Called by Rich.Live on every refresh to get the current renderable.
+
+        Uses dirty-flag caching: the display is only rebuilt when pipeline
+        state changes (module start/finish, progress update) or when the
+        resource-monitor string changes.  The Spinner animates naturally
+        because Rich walks the Group's children on each tick and calls
+        each child's own ``__rich_console__`` — no rebuild needed for
+        animation frames.
+        """
+        # Check if the resource monitor string changed since last render
+        current_res = self._monitor.format_rich() if not self._stopping else ""
+        if current_res != self._last_resource_str:
+            self._last_resource_str = current_res
+            self._dirty = True
+
+        if self._dirty or self._cached_display is None:
+            self._cached_display = self._build_display()
+            self._dirty = False
+
+        yield self._cached_display
 
     # -- display building ----------------------------------------------------
 
@@ -457,8 +531,6 @@ class PipelineLive:
         from rich.table import Table
         from rich.text import Text
         from rich.console import Group
-        from rich.progress import Progress, BarColumn, TextColumn
-        from rich.progress_bar import ProgressBar
 
         parts: list = []
 
@@ -469,7 +541,7 @@ class PipelineLive:
             header.add_column(justify="right")
             left = f"  [dim]Input:[/dim] {_display_input(self._input_path)}"
             # Hide resource stats from the final persisted view
-            right = "" if self._stopping else self._monitor.format_rich()
+            right = "" if self._stopping else self._last_resource_str
             header.add_row(left, right)
             parts.append(header)
             # Subtitle (e.g. video title) below the input line
@@ -494,29 +566,13 @@ class PipelineLive:
         for text_obj in self._results:
             parts.append(text_obj)
 
-        # Active module: spinner + config sub-messages + sub-progress bar
+        # Active module: live renderable (spinner+label+progress) + static config
         if self._active_label and not self._stopping:
-            if self._active_spinner is not None:
-                parts.append(self._active_spinner)
-            for k, v in self._active_config.items():
-                parts.append(Text.from_markup(f"    [dim]{k}:[/dim] {v}"))
-            # Compact sub-progress bar
-            if self._sub_total > 0:
-                unit_str = f" {self._sub_unit}" if self._sub_unit else ""
-                pct = (self._sub_current / self._sub_total * 100) if self._sub_total else 0
-                bar = ProgressBar(total=self._sub_total, completed=self._sub_current, width=20)
-                sub_row = Table.grid(padding=(0, 1))
-                sub_row.add_column()  # indent
-                sub_row.add_column()  # bar
-                sub_row.add_column()  # label
-                sub_row.add_row(
-                    Text("   "),
-                    bar,
-                    Text.from_markup(
-                        f"[dim]{self._sub_current}/{self._sub_total}{unit_str} ({pct:.0f}%)[/dim]"
-                    ),
-                )
-                parts.append(sub_row)
+            if self._active_renderable is not None:
+                parts.append(self._active_renderable)
+            # Config lines are cached Text objects — they never change
+            # during a module's execution so they don't flash on redraws.
+            parts.extend(self._active_config_renderables)
 
         return Group(*parts) if parts else Text("")
 
@@ -526,22 +582,38 @@ class PipelineLive:
         self, label: str, config_values: dict[str, Any] | None = None,
     ) -> None:
         """Mark *label* as the currently running module with optional config."""
-        from rich.spinner import Spinner
+        from rich.text import Text
+
         self._active_label = label
         self._active_config = config_values or {}
-        self._active_spinner = Spinner("dots", text=f"  [bold]{label}[/bold]")
+        self._active_renderable = _ActiveModuleRenderable(label, self)
+        # Pre-render config lines once — they stay static for the
+        # module's entire execution, preventing redraws / flashing.
+        self._active_config_renderables = [
+            Text.from_markup(f"    [dim]{k}:[/dim] {v}")
+            for k, v in self._active_config.items()
+        ]
         self._sub_current = self._sub_total = 0
         self._sub_unit = ""
+        self._dirty = True
 
     def clear_active_module(self) -> None:
         self._active_label = ""
         self._active_config = {}
-        self._active_spinner = None
+        self._active_renderable = None
+        self._active_config_renderables = []
         self._sub_current = self._sub_total = 0
         self._sub_unit = ""
+        self._dirty = True
 
     def update_sub_progress(self, current: int, total: int, unit: str = "") -> None:
-        """Update the sub-progress counter for the active module."""
+        """Update the sub-progress counter for the active module.
+
+        Does NOT set the dirty flag — the ``_ActiveModuleRenderable``
+        reads the latest values on every Rich tick, so the inline
+        progress bar updates without rebuilding the outer ``Group``.
+        This avoids flashing the static config lines below.
+        """
         self._sub_current = current
         self._sub_total = total
         if unit:
@@ -574,12 +646,14 @@ class PipelineLive:
             self._errors.append((label, elapsed, str(error)))
         self._active_label = ""
         self._active_config = {}
-        self._active_spinner = None
+        self._active_renderable = None
+        self._active_config_renderables = []
         self._sub_current = self._sub_total = 0
         self._sub_unit = ""
         self._completed += 1
         if self._progress is not None and self._task_id is not None:
             self._progress.update(self._task_id, completed=self._completed)
+        self._dirty = True
 
     def advance_only(self) -> None:
         """Advance the counter without adding a result line (debug / plain)."""
@@ -592,16 +666,12 @@ class PipelineLive:
     def set_input_subtitle(self, subtitle: str) -> None:
         """Set a subtitle line shown below the input path (e.g. video title)."""
         self._input_subtitle = subtitle
+        self._dirty = True
 
     def update_input_path(self, new_path: str) -> None:
         """Replace the displayed input path (e.g. after resolving a URL)."""
         self._input_path = new_path
-
-    # -- internals -----------------------------------------------------------
-
-    def _refresh(self) -> None:
-        """No-op — Live auto-refreshes via __rich_console__."""
-        pass
+        self._dirty = True
 
 
 def start_pipeline(total_modules: int, cli_name: str = "", input_path: str = "") -> None:
@@ -1017,6 +1087,9 @@ def _status_icon_plain(status: str) -> str:
     if status == "not_run":
         return "NOT RUN"
     return status
+
+
+
 
 
 

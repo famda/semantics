@@ -6,10 +6,28 @@ defaults and enabling YAML-based configuration overrides.
 
 from __future__ import annotations
 
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Optional, Tuple
 
 import yaml
 from pydantic import BaseModel, Field
+
+__all__ = [
+    "DownloadConfig",
+    "FramesConfig",
+    "SegmentsConfig",
+    "ClusteringConfig",
+    "CaptionsConfig",
+    "ObjectsConfig",
+    "TilesConfig",
+    "ScenesConfig",
+    "ActionsConfig",
+    "OcrConfig",
+    "ClassificationConfig",
+    "NerConfig",
+    "SliceConfig",
+    "VideoConfig",
+    "load_video_config",
+]
 
 
 class DownloadConfig(BaseModel):
@@ -19,7 +37,7 @@ class DownloadConfig(BaseModel):
         Full HD (1080p) -- 1920x1080
         HD     ( 720p) -- 1280x720
         SD     ( 480p) --  854x480
-        SD     ( 360p) --  640x360   <- default
+        SD     ( 360p) --  640x360 <- default
         SD     ( 240p) --  426x240
     """
 
@@ -142,7 +160,7 @@ class ObjectsConfig(BaseModel):
 
     detection_model: str = Field(
         default="yolo26x.pt",
-        description="YOLO model for object detection (e.g., yolo11s.pt, yolo26s.pt).",
+        description="YOLO model for object detection (e.g., yolo26s.pt, yolo26x.pt).",
     )
     segmentation_model: str = Field(
         default="yolo26x-seg.pt",

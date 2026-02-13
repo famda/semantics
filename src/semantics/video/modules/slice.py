@@ -68,7 +68,7 @@ def handle(
         slicing is requested.
 
     Raises:
-        SystemExit: On invalid timestamps or FFmpeg failure.
+        RuntimeError: On invalid timestamps or FFmpeg failure.
     """
     # No-op when neither bound is provided
     if start_time is None and end_time is None:
@@ -304,6 +304,6 @@ def _run_ffmpeg(command: list[str], *, debug: bool) -> None:
 
 
 def _fatal(msg: str) -> None:
-    """Print an error and exit."""
+    """Print an error and raise."""
     print(f"\n{Fore.RED}Error: {msg}{Style.RESET_ALL}", file=sys.stderr)
-    sys.exit(1)
+    raise RuntimeError(msg)

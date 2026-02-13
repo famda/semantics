@@ -43,6 +43,7 @@ def handle(
     output_folder: str,
     config: "VadConfig | None" = None,
     *,
+    save_segments: bool = False,
     debug: bool = False,
 ) -> dict:
     """Perform Voice Activity Detection on an audio file.
@@ -51,6 +52,7 @@ def handle(
         input_file: Path to the input audio file.
         output_folder: Path to the output folder for results.
         config: VadConfig with threshold and duration settings.
+        save_segments: Save detected speech segments as individual WAV files.
         debug: Enable verbose logging.
 
     Returns:
@@ -76,10 +78,14 @@ def handle(
     with gray_debug_output(debug):
         offsets = compute_chunk_offsets(chunks)
 
-    segments_dir = os.path.join(output_folder, "vad", "segments")
-    if os.path.exists(segments_dir):
-        shutil.rmtree(segments_dir)
-    os.makedirs(segments_dir, exist_ok=True)
+    vad_dir = os.path.join(output_folder, "vad")
+    os.makedirs(vad_dir, exist_ok=True)
+
+    segments_dir = os.path.join(vad_dir, "segments")
+    if save_segments:
+        if os.path.exists(segments_dir):
+            shutil.rmtree(segments_dir)
+        os.makedirs(segments_dir, exist_ok=True)
 
     json_data = {"segments": []}
     segment_index = 0
@@ -110,11 +116,16 @@ def handle(
                 if end <= start:
                     continue
 
-                segment_wav = wav[:, start:end]
                 segment_index += 1
-                segment_file = os.path.join(segments_dir, f"{segment_index}.wav")
-                with gray_debug_output(debug):
-                    torchaudio.save(segment_file, segment_wav, sr)
+
+                if save_segments:
+                    segment_wav = wav[:, start:end]
+                    segment_file = os.path.join(segments_dir, f"{segment_index}.wav")
+                    try:
+                        with gray_debug_output(debug):
+                            torchaudio.save(segment_file, segment_wav, sr)
+                    except Exception:
+                        pass  # non-critical: log via debug if needed
 
                 json_data["segments"].append(
                     {
@@ -129,9 +140,11 @@ def handle(
     finally:
         cleanup_chunks(chunk_dir)
 
-    json_file = os.path.join(output_folder, "vad", "timestamps.json")
+    json_file = os.path.join(vad_dir, "timestamps.json")
     with open(json_file, "w") as f:
         json.dump(json_data, f, indent=4)
 
     return json_data
+
+
 

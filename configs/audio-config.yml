@@ -9,6 +9,15 @@
 # ============================================================================
 
 # ----------------------------------------------------------------------------
+# Global Settings
+# ----------------------------------------------------------------------------
+# Save segment audio files for modules that produce timestamped segments
+# (VAD, transcription, CTC). When true, each module creates a segments/
+# folder with individual .wav files cut at segment boundaries.
+# Can also be enabled via the --save-segments / -seg CLI flag.
+save_segments: false
+
+# ----------------------------------------------------------------------------
 # Resample Configuration
 # ----------------------------------------------------------------------------
 # Controls audio format conversion and resampling to the target format.

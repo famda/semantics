@@ -4,12 +4,11 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import glob
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, List, Optional, Sequence, Tuple, TYPE_CHECKING
+from typing import List, Optional, Sequence, Tuple, TYPE_CHECKING
 
-from global_helpers import VIDEO_FILE_TYPES
+from global_helpers import VIDEO_FILE_TYPES, coerce_int
 from .utils.logging import gray_debug_output, info_print
 
 if TYPE_CHECKING:
@@ -17,22 +16,10 @@ if TYPE_CHECKING:
 
 __all__ = ["handle"]
 
-env = os.environ.copy()
-env["AV_LOG_FORCE_NOCOLOR"] = "1"
+_env = os.environ.copy()
+_env["AV_LOG_FORCE_NOCOLOR"] = "1"
 
 MIN_CHUNK_DURATION_SECONDS = 120.0
-
-
-def _coerce_frame_number(value: Any) -> Optional[int]:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return None
 
 
 def _resolve_frame_index(entry: dict, fallback: int) -> int:
@@ -53,7 +40,7 @@ def _resolve_frame_index(entry: dict, fallback: int) -> int:
 
     for key in candidate_keys:
         if key in entry:
-            number = _coerce_frame_number(entry.get(key))
+            number = coerce_int(entry.get(key))
             if number is not None:
                 return number
 
@@ -65,7 +52,7 @@ def _run_command(command, *, debug: bool, stdout_path: Optional[str] = None) -> 
         if stdout_path is None:
             process = subprocess.Popen(
                 command,
-                env=env,
+                env=_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -90,7 +77,7 @@ def _run_command(command, *, debug: bool, stdout_path: Optional[str] = None) -> 
         with open(stdout_path, "w", encoding="utf-8") as file_handle:
             process = subprocess.Popen(
                 command,
-                env=env,
+                env=_env,
                 stdout=file_handle,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -115,7 +102,7 @@ def _run_command(command, *, debug: bool, stdout_path: Optional[str] = None) -> 
             subprocess.run(
                 command,
                 check=True,
-                env=env,
+                env=_env,
                 stdout=f,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -124,7 +111,7 @@ def _run_command(command, *, debug: bool, stdout_path: Optional[str] = None) -> 
         subprocess.run(
             command,
             check=True,
-            env=env,
+            env=_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -148,7 +135,7 @@ def _probe_video_info(path: str) -> Tuple[float, float]:
         completed = subprocess.run(
             command,
             check=False,
-            env=env,
+            env=_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -423,8 +410,7 @@ def _extract(
     file_type = file.split(".")[-1].lower()
 
     if file_type not in VIDEO_FILE_TYPES:
-        print("Error: Frame extraction is only supported for video files.", file=sys.stderr)
-        sys.exit(1)
+        raise RuntimeError("Frame extraction is only supported for video files.")
 
     output_folder = os.path.join(temp_folder, "frames")
     frames_file = os.path.join(output_folder, "frames.json")

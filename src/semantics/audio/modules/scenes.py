@@ -6,10 +6,11 @@ import json
 import math
 import os
 import re
+import shutil
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -22,11 +23,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .utils.logging import debug_print, gray_debug_output, info_print
 
-# Import config type for type hints
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
-    from config import ScenesConfig
+    from ..config import ScenesConfig
 
 warnings.filterwarnings("ignore")
 
@@ -1131,6 +1129,7 @@ def handle(
     output_folder: str,
     config: "ScenesConfig | None" = None,
     *,
+    save_segments: bool = False,
     debug: bool = False,
 ):
     """Main entry point for chapter/scene detection.
@@ -1139,12 +1138,14 @@ def handle(
         input_file: Path to transcript JSON or working directory.
         output_folder: Path to output directory.
         config: ScenesConfig instance or None for defaults.
+        save_segments: Save each chapter as an individual WAV file.
         debug: Enable verbose debug output.
 
     Returns:
         Dict containing summary and chapters, or empty list on error.
     """
-    return _chapters(input_file, output_folder, config=config, debug=debug)
+    return _chapters(input_file, output_folder, config=config,
+                     save_segments=save_segments, debug=debug)
 
 
 def _chapters(
@@ -1152,6 +1153,7 @@ def _chapters(
     output_folder: Optional[str] = None,
     config: "ScenesConfig | None" = None,
     *,
+    save_segments: bool = False,
     debug: bool = False,
 ):
     info_print("Generating chapter summaries")
@@ -1247,7 +1249,66 @@ def _chapters(
     except Exception as exc:
         print(f"ERROR: Failed to write chapters to {output_path}: {exc}")
 
+    if save_segments and chapter_results:
+        _save_chapter_segments(scene_root, scene_dir, chapter_results, debug=debug)
+
     if debug:
         identifier.print_chapters(chapter_objects)
 
     return output_payload
+
+
+def _save_chapter_segments(
+    working_dir: Path,
+    chapters_dir: Path,
+    chapters: list,
+    *,
+    debug: bool = False,
+) -> None:
+    """Save each chapter as an individual WAV file.
+
+    Locates the resampled audio file in the working directory and slices
+    it by each chapter's start/end timestamps.
+    """
+    import soundfile as sf
+
+    # Locate the resampled audio file
+    audio_path = working_dir / "audio.wav"
+    if not audio_path.exists():
+        if debug:
+            print(f"WARN: Cannot save chapter segments — audio not found at {audio_path}")
+        return
+
+    try:
+        data, sample_rate = sf.read(str(audio_path), dtype="float32")
+    except Exception as exc:
+        if debug:
+            print(f"WARN: Could not read audio for chapter segments: {exc}")
+        return
+
+    total_samples = len(data)
+    segments_dir = chapters_dir / "segments"
+    if segments_dir.exists():
+        shutil.rmtree(segments_dir)
+    segments_dir.mkdir(parents=True, exist_ok=True)
+
+    info_print(f"Saving {len(chapters)} chapter segment audio files to {segments_dir}")
+
+    for idx, ch in enumerate(chapters):
+        start_sample = int(ch["start_time"] * sample_rate)
+        end_sample = int(ch["end_time"] * sample_rate)
+        start_sample = max(0, min(start_sample, total_samples))
+        end_sample = max(start_sample, min(end_sample, total_samples))
+        if end_sample <= start_sample:
+            continue
+
+        # Sanitize title for filename
+        title = ch.get("chapter_title", "")
+        safe_title = re.sub(r'[^\w\s-]', '', title).strip().replace(' ', '_')[:60]
+        filename = f"{idx}_{safe_title}.wav" if safe_title else f"{idx}.wav"
+
+        segment_data = data[start_sample:end_sample]
+        try:
+            sf.write(str(segments_dir / filename), segment_data, sample_rate)
+        except Exception:
+            pass  # non-critical

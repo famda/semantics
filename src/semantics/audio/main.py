@@ -93,6 +93,12 @@ except Exception as e:
 )
 @click.option("--slice-start", type=str, default=None, help="Start timestamp for slicing (HH:MM:SS or HH:MM:SS.mmm)")
 @click.option("--slice-end", type=str, default=None, help="End timestamp for slicing (HH:MM:SS or HH:MM:SS.mmm)")
+@click.option(
+    "-seg",
+    "--save-segments",
+    is_flag=True,
+    help="Save segment audio files for modules that produce timestamped segments (VAD, transcription, CTC, diarization, stem, chapters)",
+)
 def main(
     input_file: str,
     output_folder: str,
@@ -114,6 +120,7 @@ def main(
     config: Optional[str],
     slice_start: Optional[str],
     slice_end: Optional[str],
+    save_segments: bool,
 ) -> None:
     """
     \b
@@ -155,6 +162,10 @@ def main(
     if audio_config is None:
         from config import AudioConfig
         audio_config = AudioConfig()
+
+    # Override save_segments from CLI flag
+    if save_segments:
+        audio_config.save_segments = True
 
     # Detect URL input
     is_url = input_file.startswith("https://www.youtube.com/watch?v=") or input_file.startswith("https://youtu.be/")
@@ -266,7 +277,8 @@ def main(
             stem_cfg = audio_config.stem if audio_config else None
             audio_file, _ = run_module(
                 "Source Separation", stem_module.handle,
-                audio_file, temp_folder, config=stem_cfg, debug=debug,
+                audio_file, temp_folder, config=stem_cfg,
+                save_segments=audio_config.save_segments, debug=debug,
             )
 
         # Audio enhancement
@@ -296,7 +308,8 @@ def main(
             vad_cfg = audio_config.vad if audio_config else None
             _, _ = run_module(
                 "VAD", vad_module.handle,
-                audio_file, temp_folder, config=vad_cfg, debug=debug,
+                audio_file, temp_folder, config=vad_cfg,
+                save_segments=audio_config.save_segments, debug=debug,
             )
 
         # Transcription
@@ -306,7 +319,8 @@ def main(
             transcribe_cfg = audio_config.transcribe if audio_config else None
             _, _ = run_module(
                 "Transcription", transcriber.handle,
-                audio_file, temp_folder, config=transcribe_cfg, debug=debug,
+                audio_file, temp_folder, config=transcribe_cfg,
+                save_segments=audio_config.save_segments, debug=debug,
             )
 
         # Experimental transcription (ultra-fast with CTC alignment)
@@ -318,7 +332,8 @@ def main(
             )
             _, _ = run_module(
                 "Transcription (Exp.)", transcriber_exp.handle,
-                audio_file, temp_folder, config=transcribe_exp_cfg, debug=debug,
+                audio_file, temp_folder, config=transcribe_exp_cfg,
+                save_segments=audio_config.save_segments, debug=debug,
             )
 
         # Speaker diarization
@@ -328,7 +343,8 @@ def main(
             diarize_cfg = audio_config.diarize if audio_config else None
             _, _ = run_module(
                 "Diarization", diarizer.handle,
-                audio_file, temp_folder, config=diarize_cfg, debug=debug,
+                audio_file, temp_folder, config=diarize_cfg,
+                save_segments=audio_config.save_segments, debug=debug,
             )
 
         # CTC forced alignment
@@ -353,7 +369,8 @@ def main(
                 ctc_cfg = audio_config.ctc if audio_config else None
                 _, _ = run_module(
                     "CTC Alignment", ctc_module.handle,
-                    audio_file, temp_folder, config=ctc_cfg, debug=debug,
+                    audio_file, temp_folder, config=ctc_cfg,
+                    save_segments=audio_config.save_segments, debug=debug,
                 )
 
         # Emotion recognition
@@ -403,7 +420,8 @@ def main(
 
                 _, _ = run_module(
                     "Scene Detection", scenes_module.handle,
-                    segments_file, temp_folder, config=scenes_cfg, debug=debug,
+                    segments_file, temp_folder, config=scenes_cfg,
+                    save_segments=audio_config.save_segments, debug=debug,
                 )
             else:
                 skip_module("Scene Detection", "requires transcription or CTC alignment")
@@ -467,3 +485,4 @@ def main(
 
 if __name__ == "__main__":
     main()
+

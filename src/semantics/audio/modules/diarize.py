@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import wave
 from typing import TYPE_CHECKING, List
 
+import soundfile as sf
 import wget
 from nemo.collections.asr.models.msdd_models import NeuralDiarizer
 from omegaconf import OmegaConf
@@ -29,6 +31,7 @@ def handle(
     output_folder: str,
     config: "DiarizeConfig | None" = None,
     *,
+    save_segments: bool = False,
     debug: bool = False,
 ) -> list:
     """Perform speaker diarization using NeMo MSDD.
@@ -37,6 +40,7 @@ def handle(
         input_file: Path to the input audio file.
         output_folder: Directory where output files will be written.
         config: DiarizeConfig instance with diarization parameters, or None for defaults.
+        save_segments: Save each speaker segment as an individual WAV file.
         debug: If True, emit verbose debug output.
 
     Returns:
@@ -156,7 +160,51 @@ def handle(
     with open(output_json_path, "w") as f:
         json.dump(segments, f, indent=4)
 
+    if save_segments and segments:
+        _save_segment_audio_files(input_file, diarization_dir, segments, debug=debug)
+
     return segments
+
+
+def _save_segment_audio_files(
+    audio_file: str,
+    diarization_dir: str,
+    segments: List[dict],
+    *,
+    debug: bool = False,
+) -> None:
+    """Save each diarization segment as an individual WAV file."""
+    segments_dir = os.path.join(diarization_dir, "segments")
+    if os.path.exists(segments_dir):
+        shutil.rmtree(segments_dir)
+    os.makedirs(segments_dir, exist_ok=True)
+
+    try:
+        data, sample_rate = sf.read(audio_file, dtype="float32")
+    except Exception as exc:
+        if debug:
+            debug_print(f"WARN: Could not read audio for segment saving: {exc}", debug=True)
+        return
+
+    total_samples = len(data)
+    info_print(f"Saving {len(segments)} segment audio files to {segments_dir}")
+
+    for idx, seg in enumerate(segments):
+        start_sample = int(seg["start"] * sample_rate)
+        end_sample = int(seg["end"] * sample_rate)
+        start_sample = max(0, min(start_sample, total_samples))
+        end_sample = max(start_sample, min(end_sample, total_samples))
+
+        if end_sample <= start_sample:
+            continue
+
+        segment_data = data[start_sample:end_sample]
+        speaker = seg.get("speaker", "unknown")
+        segment_file = os.path.join(segments_dir, f"{idx}_{speaker}.wav")
+        try:
+            sf.write(segment_file, segment_data, sample_rate)
+        except Exception:
+            pass  # non-critical
 
 
 def _parse_rttm(rttm_file: str) -> List[dict]:
@@ -201,7 +249,7 @@ def _create_msdd_config(
     debug: bool,
 ):
     """Create NeMo MSDD configuration."""
-    config_dir = "nemo_msdd_configs"
+    config_dir = os.path.join(output_dir, "nemo_msdd_configs")
     config_file = f"diar_infer_{domain_type}.yaml"
     config_path = os.path.join(config_dir, config_file)
 

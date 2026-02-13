@@ -34,8 +34,8 @@ if TYPE_CHECKING:
 __all__ = ["handle"]
 
 # Environment optimizations
-os.environ["YOLO_VERBOSE"] = "False"
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+os.environ.setdefault("YOLO_VERBOSE", "False")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 os.environ.setdefault("TF_DISABLE_XLA", "1")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 warnings.filterwarnings("ignore")
@@ -86,7 +86,7 @@ def _get_objects_defaults() -> dict:
             "detection_model": "yolo26x.pt",
             "segmentation_model": "yolo26x-seg.pt",
             "pose_model": "yolo26x-pose.pt",
-            "object_conf_threshold": 0.80,
+            "object_conf_threshold": 0.50,
             "iou_match_threshold": 0.5,
             "keypoint_conf_threshold": 0.6,
             "face_conf_threshold": 0.9,
@@ -150,7 +150,8 @@ class ThreadedImageWriter:
         
         # Backpressure: Wait if queue is full
         if len(self.futures) > self.max_queue:
-            _, self.futures = wait(self.futures, return_when="FIRST_COMPLETED")
+            _, not_done = wait(self.futures, return_when="FIRST_COMPLETED")
+            self.futures = list(not_done)
             
         self.futures.append(self.executor.submit(cv2.imwrite, path, img))
         
@@ -192,7 +193,7 @@ class AsyncVideoReader:
             current_pos = idx
             
             if not ret:
-                break
+                continue
                 
             self.queue.put((idx, frame))
             

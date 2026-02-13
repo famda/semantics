@@ -16,6 +16,7 @@ Quality labels (height -> resolution):
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import yt_dlp
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
 __all__ = ["handle"]
 
 DEFAULT_FILENAME_TEMPLATE = "%(title)s_%(id)s.%(ext)s"
-DEFAULT_MAX_HEIGHT = 360
+DEFAULT_MAX_HEIGHT = 480
 
 
 # ---------------------------------------------------------------------------
@@ -97,13 +98,14 @@ def _download(
 
     options = _build_options(absolute_output, filename_template, max_height, debug)
 
-    # First attempt -- DASH (separate video+audio, merged by ffmpeg)
+    # Attempt 1 — DASH (separate video+audio, merged by ffmpeg)
     try:
         info_dict = _run_download(url, options)
     except yt_dlp.utils.DownloadError:
-        # Fallback to progressive stream (single file, no merge)
+        # Attempt 2 — progressive stream (single file, lower quality).
+        # Falls back when DASH fails (e.g. restricted videos, geo-blocks).
         info_print("Retrying with progressive format")
-        options["format"] = _fallback_format(max_height)
+        options["format"] = _progressive_format(max_height)
         try:
             info_dict = _run_download(url, options)
         except yt_dlp.utils.DownloadError as exc:
@@ -115,8 +117,62 @@ def _download(
             "Download finished but the output file could not be determined"
         )
 
+    # Convert to MP4 when the container is not already .mp4.
+    # VP9/webm containers cause issues with downstream frame extraction
+    # (OpenCV seek, segment export, etc.).  Similar to how the audio CLI
+    # resamples after download, we re-mux/transcode here.
+    final_path = _ensure_mp4(final_path, debug=debug)
+
     title = info_dict.get("title", "")
     return os.path.abspath(final_path), title
+
+
+def _ensure_mp4(path: str, *, debug: bool) -> str:
+    """Re-encode *path* into an H.264/AAC MP4 when the extension differs.
+
+    VP9/webm containers (and VP9 stream-copied into MP4) cause broken
+    frame-level seeking in OpenCV, which silently breaks every downstream
+    module that uses ``cv2.VideoCapture.set(CAP_PROP_POS_FRAMES, …)``.
+    We therefore **always** re-encode to H.264 + AAC to guarantee
+    reliable seeking.
+
+    The original file is kept alongside the new ``.mp4`` copy.  If the
+    file is already ``.mp4`` no work is performed.
+
+    Returns:
+        Absolute path to the ``.mp4`` file.
+    """
+    root, ext = os.path.splitext(path)
+    if ext.lower() == ".mp4":
+        return path
+
+    mp4_path = root + ".mp4"
+    info_print("Re-encoding to H.264 MP4")
+
+    cmd: list[str] = [
+        "ffmpeg",
+        "-hide_banner",
+        "-y",
+        "-i", path,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "18",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-movflags", "+faststart",
+        mp4_path,
+    ]
+    if not debug:
+        cmd.insert(2, "-loglevel")
+        cmd.insert(3, "error")
+
+    subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+    if not os.path.exists(mp4_path):
+        # Conversion failed silently — return original
+        return path
+
+    return mp4_path
 
 
 def _build_options(
@@ -177,8 +233,8 @@ def _make_progress_hook():
     return _hook
 
 
-def _fallback_format(max_height: int) -> str:
-    """Progressive-only format selector."""
+def _progressive_format(max_height: int) -> str:
+    """Progressive-only format selector (single-file, no merge needed)."""
     if max_height:
         return f"best[height<={max_height}]"
     return "best"

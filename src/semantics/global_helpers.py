@@ -393,3 +393,17 @@ def estimate_dbscan_eps(vectors: np.ndarray, base_eps: float, min_samples: int) 
     candidate = max(p_low, min(p_high, float(base_eps)))
     candidate = max(0.02, min(candidate, float(base_eps)))
     return candidate
+
+
+def coerce_int(value) -> Optional[int]:
+    """Convert *value* to ``int``, handling floats and ``None``.
+
+    Returns ``None`` when the conversion is not possible.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return None

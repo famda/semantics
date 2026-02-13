@@ -301,6 +301,7 @@ def _align_transcript(
     min_overlap: float = 0.0,
     model: str = "stt_en_quartznet15x5",
     device: str = "cpu",
+    save_segments: bool = False,
     debug: bool = False,
 ) -> Path:
     """Align transcript to audio and write alignment JSON."""
@@ -668,7 +669,7 @@ def _align_transcript(
 
         segments_out.append(new_segment)
 
-    if segment_audio_slices:
+    if save_segments and segment_audio_slices:
         segments_dir = output_path.parent / "segments"
         segments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -735,6 +736,7 @@ def handle(
     output_folder: str,
     config: "CtcConfig | None" = None,
     *,
+    save_segments: bool = False,
     debug: bool = False,
 ) -> Optional[Path]:
     """Perform CTC forced alignment on transcription.
@@ -745,6 +747,7 @@ def handle(
         input_file: Path to the input audio file.
         output_folder: Directory where output files will be written.
         config: CtcConfig instance with alignment parameters, or None for defaults.
+        save_segments: Save aligned segments as individual WAV files.
         debug: If True, emit verbose debug output.
 
     Returns:
@@ -776,10 +779,9 @@ def handle(
     output_path = ctc_dir / "alignment.json"
 
     # Auto-detect device: use CUDA when available unless overridden
-    import torch as _torch
     device = config.device if config and config.device else None
     if device is None:
-        device = "cuda" if _torch.cuda.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
     try:
         _align_transcript(
@@ -790,6 +792,7 @@ def handle(
             segment_backoffs=segment_backoffs,
             min_overlap=min_overlap,
             device=device,
+            save_segments=save_segments,
             debug=debug,
         )
         LOGGER.info("Alignment written to %s", output_path)
@@ -797,3 +800,4 @@ def handle(
     except Exception as exc:
         LOGGER.error("Alignment failed: %s", exc)
         raise
+

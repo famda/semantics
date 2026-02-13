@@ -488,6 +488,10 @@ class DownloadConfig(BaseModel):
 class AudioConfig(BaseModel):
     """Root configuration for the audio CLI."""
 
+    save_segments: bool = Field(
+        default=False,
+        description="Save segment audio files to each module's segments/ folder",
+    )
     slice: SliceConfig = Field(default_factory=SliceConfig)
     download: DownloadConfig = Field(default_factory=DownloadConfig)
     resample: ResampleConfig = Field(default_factory=ResampleConfig)
@@ -559,3 +563,4 @@ def load_audio_config(path: str) -> AudioConfig:
         )
 
     return config
+

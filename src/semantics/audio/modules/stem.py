@@ -19,6 +19,8 @@ import numpy as np
 from scipy.io import wavfile
 from scipy.ndimage import uniform_filter1d
 
+import soundfile as sf
+
 from colorama import Fore, Style, init
 
 from .utils.chunks import cleanup_chunks, concatenate_audio, split_audio
@@ -133,11 +135,84 @@ def detect_audio_segments(
         return []
 
 
+def _save_stem_segments(stem_dir: Path) -> None:
+    """Save individual WAV files for each detected vocal and music segment.
+
+    Reads ``stem/stem.json`` for timestamps and slices the corresponding
+    stem WAV files (``vocals.wav`` / ``no_vocals.wav``) into per-segment
+    audio files under ``stem/segments/vocals/`` and ``stem/segments/music/``.
+    """
+    json_path = stem_dir / "stem.json"
+    if not json_path.exists():
+        return
+
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            all_segments = json.load(f)
+    except Exception:
+        return
+
+    if not all_segments:
+        return
+
+    # Map labels to source WAV files
+    source_map = {
+        "vocals": stem_dir / "vocals.wav",
+        "music": stem_dir / "no_vocals.wav",
+    }
+
+    # Pre-load audio data for each label present
+    audio_cache: Dict[str, tuple] = {}
+    for label, wav_path in source_map.items():
+        if wav_path.exists():
+            try:
+                data, sr = sf.read(str(wav_path), dtype="float32")
+                audio_cache[label] = (data, sr)
+            except Exception:
+                pass
+
+    if not audio_cache:
+        return
+
+    segments_root = stem_dir / "segments"
+    if segments_root.exists():
+        shutil.rmtree(segments_root)
+
+    total_segs = sum(1 for s in all_segments if s.get("label") in audio_cache)
+    info_print(f"Saving {total_segs} stem segment audio files to {segments_root}")
+
+    saved = 0
+    for label in ("vocals", "music"):
+        if label not in audio_cache:
+            continue
+        data, sr = audio_cache[label]
+        total_samples = len(data)
+        label_dir = segments_root / label
+        label_dir.mkdir(parents=True, exist_ok=True)
+
+        label_segments = [s for s in all_segments if s.get("label") == label]
+        for idx, seg in enumerate(label_segments):
+            start_sample = int(seg["start"] * sr)
+            end_sample = int(seg["end"] * sr)
+            start_sample = max(0, min(start_sample, total_samples))
+            end_sample = max(start_sample, min(end_sample, total_samples))
+            if end_sample <= start_sample:
+                continue
+            segment_data = data[start_sample:end_sample]
+            try:
+                sf.write(str(label_dir / f"{idx}.wav"), segment_data, sr)
+                saved += 1
+            except Exception:
+                pass
+
+
+
 def handle(
     input_file: str,
     output_folder: str,
     config: "StemConfig | None" = None,
     *,
+    save_segments: bool = False,
     debug: bool = False,
 ) -> str:
     """Perform source separation using Demucs and generate timestamp JSON."""
@@ -302,7 +377,10 @@ def handle(
                 # Cleanup Demucs raw folder
                 shutil.rmtree(temp_path / model, ignore_errors=True)
                 
-                return generate_json_and_finalize(stem_dir)
+                result = generate_json_and_finalize(stem_dir)
+                if save_segments:
+                    _save_stem_segments(stem_dir)
+                return result
             return input_file
 
         # Case B: Chunking needed
@@ -326,7 +404,10 @@ def handle(
         for stem_name, files in stem_chunks.items():
             concatenate_audio(files, str(stem_dir / stem_name), chunk_dir)
 
-        return generate_json_and_finalize(stem_dir)
+        result = generate_json_and_finalize(stem_dir)
+        if save_segments:
+            _save_stem_segments(stem_dir)
+        return result
 
     except Exception as exc:
         print(f"WARN: Process failed: {exc}")
