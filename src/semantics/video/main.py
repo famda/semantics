@@ -409,11 +409,13 @@ def main(
                 from modules import objects as objects_module
 
             objects_cfg = video_config.objects if video_config else None
+            faces_cfg = video_config.faces if video_config else None
             _, _ = run_module(
                 "Object Detection", objects_module.handle,
                 file,
                 temp_folder,
                 config=objects_cfg,
+                faces_config=faces_cfg,
                 object_classes=list(object_classes),
                 frame_indices=frame_indices_to_process,
                 perform_clustering=cluster_objects,

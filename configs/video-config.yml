@@ -123,26 +123,31 @@ captions:
   run_visual_grounding: false
 
 # -----------------------------------------------------------------------------
-# Object Detection Configuration (YOLO + DeepFace)
+# Object Detection Configuration (YOLO + Tracking)
 # -----------------------------------------------------------------------------
 objects:
-  # YOLO model for object detection
+  # YOLO model for primary object detection (highest recall)
+  # This model determines which objects exist. Provides bounding boxes only.
   # Options: "yolo11n.pt", "yolo11s.pt", "yolo11m.pt", "yolo11l.pt", "yolo11x.pt"
   #          "yolo26n.pt", "yolo26s.pt", "yolo26m.pt", "yolo26l.pt", "yolo26x.pt"
-  detection_model: "yolo26s.pt"
+  detection_model: "yolo26x.pt"
 
-  # YOLO model for instance segmentation
+  # YOLO model for instance segmentation (provides masks, matched to detections by IoU)
   # Options: "yolo11n-seg.pt", "yolo11s-seg.pt", "yolo11m-seg.pt", etc.
   #          "yolo26n-seg.pt", "yolo26s-seg.pt", "yolo26m-seg.pt", etc.
-  segmentation_model: "yolo26s-seg.pt"
+  segmentation_model: "yolo26x-seg.pt"
 
-  # YOLO model for pose estimation
+  # YOLO model for pose estimation (secondary, matched by IoU)
   # Options: "yolo11n-pose.pt", "yolo11s-pose.pt", "yolo11m-pose.pt", etc.
   #          "yolo26n-pose.pt", "yolo26s-pose.pt", "yolo26m-pose.pt", etc.
-  pose_model: "yolo26s-pose.pt"
+  pose_model: "yolo26x-pose.pt"
 
-  # Confidence threshold for YOLO object detection (0.0 - 1.0)
+  # Confidence threshold for primary YOLO object detection (0.0 - 1.0)
   object_conf_threshold: 0.80
+
+  # Confidence threshold for segmentation model (lower to maximize mask coverage)
+  # The seg model runs at a lower confidence to catch more masks
+  segmentation_conf_threshold: 0.25
 
   # IoU threshold for matching detections across frames
   iou_match_threshold: 0.5
@@ -150,32 +155,12 @@ objects:
   # Confidence threshold for pose keypoint detection
   keypoint_conf_threshold: 0.6
 
-  # Confidence threshold for face detection
-  face_conf_threshold: 0.9
-
-  # DeepFace embedding model for face recognition
-  # Options: "Facenet", "Facenet512", "VGG-Face", "ArcFace", etc.
-  embedding_model_name: "Facenet512"
-
-  # Minimum image side length for face detection upscaling
-  face_detect_min_side: 720
-
-  # Maximum scale factor for face detection upscaling
-  face_detect_max_scale: 2.0
-
-  # DeepFace detector backend
-  # Options: "retinaface", "mtcnn", "opencv", "ssd", "dlib"
-  detector_backend: "retinaface"
-
   # HuggingFace CLIP model for object embedding and similarity
   # Options: "openai/clip-vit-base-patch32", "openai/clip-vit-base-patch16", "openai/clip-vit-large-patch14", etc.
   clip_model_name: "openai/clip-vit-base-patch32"
 
   # Base DBSCAN epsilon for object clustering
   cluster_base_eps: 0.35
-
-  # Base DBSCAN epsilon for face clustering
-  face_cluster_base_eps: 0.20
 
   # Cosine similarity threshold for near-duplicate pre-filtering before clustering.
   # Crops above this similarity to the previous kept crop are collapsed.
@@ -201,6 +186,30 @@ objects:
 
   # Require both DBSCAN and Hamming criteria for keyframe selection
   keyframe_require_both: true
+
+# -----------------------------------------------------------------------------
+# Face Detection & Embedding Configuration (DeepFace)
+# -----------------------------------------------------------------------------
+faces:
+  # Confidence threshold for face detection
+  face_conf_threshold: 0.9
+
+  # DeepFace embedding model for face recognition
+  # Options: "Facenet", "Facenet512", "VGG-Face", "ArcFace", etc.
+  embedding_model_name: "Facenet512"
+
+  # Minimum image side length for face detection upscaling
+  face_detect_min_side: 720
+
+  # Maximum scale factor for face detection upscaling
+  face_detect_max_scale: 2.0
+
+  # DeepFace detector backend
+  # Options: "retinaface", "mtcnn", "opencv", "ssd", "dlib"
+  detector_backend: "retinaface"
+
+  # Base DBSCAN epsilon for face clustering
+  face_cluster_base_eps: 0.20
 
 # -----------------------------------------------------------------------------
 # Tiles Configuration (Video Mosaics)

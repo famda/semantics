@@ -4,6 +4,8 @@ A unified CLI toolkit for media intelligence, providing audio processing, video 
 
 Extract meaning, not just metadata. Composable AI operations designed for developers.
 
+![Semantics CLI Intro](docs/assets/intro.gif)
+
 ## Install
 
 ### Prerequisites

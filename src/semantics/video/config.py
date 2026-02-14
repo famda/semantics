@@ -17,6 +17,7 @@ __all__ = [
     "SegmentsConfig",
     "ClusteringConfig",
     "CaptionsConfig",
+    "FacesConfig",
     "ObjectsConfig",
     "TilesConfig",
     "ScenesConfig",
@@ -155,33 +156,9 @@ class CaptionsConfig(BaseModel):
     )
 
 
-class ObjectsConfig(BaseModel):
-    """Configuration for YOLO-based object detection, pose estimation, and face recognition."""
+class FacesConfig(BaseModel):
+    """Configuration for face detection and embedding extraction (DeepFace)."""
 
-    detection_model: str = Field(
-        default="yolo26x.pt",
-        description="YOLO model for object detection (e.g., yolo26s.pt, yolo26x.pt).",
-    )
-    segmentation_model: str = Field(
-        default="yolo26x-seg.pt",
-        description="YOLO model for instance segmentation (e.g., yolo11s-seg.pt, yolo26s-seg.pt).",
-    )
-    pose_model: str = Field(
-        default="yolo26x-pose.pt",
-        description="YOLO model for pose estimation (e.g., yolo11s-pose.pt, yolo26s-pose.pt).",
-    )
-    object_conf_threshold: float = Field(
-        default=0.80,
-        description="Confidence threshold for YOLO object detection.",
-    )
-    iou_match_threshold: float = Field(
-        default=0.5,
-        description="IoU threshold for matching detections across frames.",
-    )
-    keypoint_conf_threshold: float = Field(
-        default=0.6,
-        description="Confidence threshold for pose keypoint detection.",
-    )
     face_conf_threshold: float = Field(
         default=0.9,
         description="Confidence threshold for face detection.",
@@ -202,6 +179,68 @@ class ObjectsConfig(BaseModel):
         default="retinaface",
         description="DeepFace detector backend: 'retinaface', 'mtcnn', 'opencv', etc.",
     )
+    face_cluster_base_eps: float = Field(
+        default=0.40,
+        description="Base DBSCAN epsilon for face clustering (Facenet512 cosine space).",
+    )
+    face_cluster_dedup_threshold: float = Field(
+        default=0.99,
+        description=(
+            "Cosine similarity threshold for near-duplicate pre-filtering "
+            "of face crops. Facenet512 embeddings of the same person across "
+            "frames can reach 0.95+, so this must be higher than the object "
+            "dedup threshold to avoid collapsing distinct views."
+        ),
+    )
+    face_cluster_noise_max_distance: float = Field(
+        default=0.55,
+        description=(
+            "Maximum cosine distance from nearest centroid before a face "
+            "is relegated to noise. Facenet512 same-person distance is "
+            "typically < 0.35."
+        ),
+    )
+    face_cluster_min_samples: int = Field(
+        default=1,
+        description="DBSCAN min_samples for face clustering.",
+    )
+    face_cluster_min_attempts: int = Field(
+        default=6,
+        description="Minimum adaptive DBSCAN attempts for face clustering.",
+    )
+
+
+class ObjectsConfig(BaseModel):
+    """Configuration for YOLO-based object detection, segmentation, and pose estimation."""
+
+    detection_model: str = Field(
+        default="yolo26x.pt",
+        description="YOLO model for primary object detection (highest recall).",
+    )
+    segmentation_model: str = Field(
+        default="yolo26x-seg.pt",
+        description="YOLO model for instance segmentation masks.",
+    )
+    pose_model: str = Field(
+        default="yolo26x-pose.pt",
+        description="YOLO model for pose estimation keypoints.",
+    )
+    object_conf_threshold: float = Field(
+        default=0.80,
+        description="Confidence threshold for YOLO object detection.",
+    )
+    segmentation_conf_threshold: float = Field(
+        default=0.25,
+        description="Confidence threshold for YOLO segmentation (lower to maximize mask coverage).",
+    )
+    iou_match_threshold: float = Field(
+        default=0.5,
+        description="IoU threshold for matching detections across models.",
+    )
+    keypoint_conf_threshold: float = Field(
+        default=0.6,
+        description="Confidence threshold for pose keypoint detection.",
+    )
     clip_model_name: str = Field(
         default="openai/clip-vit-base-patch32",
         description="HuggingFace CLIP model for object embedding and similarity.",
@@ -209,10 +248,6 @@ class ObjectsConfig(BaseModel):
     cluster_base_eps: float = Field(
         default=0.35,
         description="Base DBSCAN epsilon for object clustering.",
-    )
-    face_cluster_base_eps: float = Field(
-        default=0.20,
-        description="Base DBSCAN epsilon for face clustering.",
     )
     cluster_dedup_threshold: float = Field(
         default=0.95,
@@ -458,7 +493,11 @@ class VideoConfig(BaseModel):
     )
     objects: ObjectsConfig = Field(
         default_factory=ObjectsConfig,
-        description="Object detection and face recognition settings.",
+        description="Object detection, segmentation, and pose settings.",
+    )
+    faces: FacesConfig = Field(
+        default_factory=FacesConfig,
+        description="Face detection and embedding settings.",
     )
     tiles: TilesConfig = Field(
         default_factory=TilesConfig,
