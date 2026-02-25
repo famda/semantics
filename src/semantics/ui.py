@@ -660,8 +660,6 @@ class PipelineLive:
         self._completed += 1
         if self._progress is not None and self._task_id is not None:
             self._progress.update(self._task_id, completed=self._completed)
-        elif _plain_mode:
-            print(f"  [{self._completed}/{self._total}]")
 
     def set_input_subtitle(self, subtitle: str) -> None:
         """Set a subtitle line shown below the input path (e.g. video title)."""
@@ -719,7 +717,7 @@ def update_sub_progress(current: int, total: int, unit: str = "") -> None:
     """
     if _pipeline_live is not None and not _plain_mode and not _debug_mode:
         _pipeline_live.update_sub_progress(current, total, unit)
-    elif (_plain_mode or _debug_mode) and total > 0:
+    elif _debug_mode and total > 0:
         # Print a progress dot every ~10 % to keep the user informed
         step = max(1, total // 10)
         if current % step == 0 or current == total:
@@ -838,13 +836,7 @@ def _run_module_plain(
 ) -> Tuple[Any, Tuple[str, float, str]]:
     """Plain mode — simple text progress."""
     global _spinner_active
-    res = get_resource_status()
-    if res:
-        print(f"  [{res}]")
-    print(f"  > {label}...", end="" if not config_display else "\n", flush=True)
-    if config_display:
-        for k, v in config_display.items():
-            print(f"    {k}: {v}")
+    print(f"INFO: {label}", flush=True)
     _spinner_active = True
     t0 = time.perf_counter()
     result = None
@@ -854,10 +846,6 @@ def _run_module_plain(
         _spinner_active = False
         entry = (label, elapsed, "done")
         _all_timings.append(entry)
-        if config_display:
-            print(f"  done ({format_duration(elapsed)})")
-        else:
-            print(f" done ({format_duration(elapsed)})")
         if _pipeline_live:
             _pipeline_live.advance_only()
         return result, entry
@@ -874,11 +862,7 @@ def _run_module_plain(
         _spinner_active = False
         entry = (label, elapsed, "fail")
         _all_timings.append(entry)
-        if config_display:
-            print(f"  FAILED ({format_duration(elapsed)})")
-        else:
-            print(f" FAILED ({format_duration(elapsed)})")
-        print(f"    Error: {exc}")
+        print(f"ERROR: {label} failed: {exc}")
         if _pipeline_live:
             _pipeline_live.advance_only()
         return None, entry
