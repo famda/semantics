@@ -533,7 +533,9 @@ def _run_diarization(
 
     if not os.path.exists(config_path):
         os.makedirs(config_dir, exist_ok=True)
-        config_url = f"https://raw.githubusercontent.com/NVIDIA/NeMo/main/examples/speaker_tasks/diarization/conf/inference/{config_file}"
+        # Pin to r2.3.0 to match installed nemo_toolkit; the `main` branch
+        # config no longer contains the `diarizer.msdd_model` section.
+        config_url = f"https://raw.githubusercontent.com/NVIDIA/NeMo/r2.3.0/examples/speaker_tasks/diarization/conf/inference/{config_file}"
         debug_print(f"Downloading diarization config from {config_url}", debug=debug)
         with gray_debug_output(debug):
             config_path = wget.download(config_url, config_path)

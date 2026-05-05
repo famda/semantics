@@ -255,7 +255,10 @@ def _create_msdd_config(
 
     if not os.path.exists(config_path):
         os.makedirs(config_dir, exist_ok=True)
-        config_url = f"https://raw.githubusercontent.com/NVIDIA/NeMo/main/examples/speaker_tasks/diarization/conf/inference/{config_file}"
+        # Pin to r2.3.0 to match installed nemo_toolkit; the `main` branch
+        # config no longer contains the `diarizer.msdd_model` section the
+        # NeuralDiarizer requires, which causes a missing-key crash.
+        config_url = f"https://raw.githubusercontent.com/NVIDIA/NeMo/r2.3.0/examples/speaker_tasks/diarization/conf/inference/{config_file}"
         if debug:
             debug_print(
                 f"INFO: Downloading diarization config from {config_url}", debug=True
