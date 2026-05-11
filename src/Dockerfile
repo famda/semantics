@@ -65,7 +65,7 @@ COPY ["src/semantics/setup-cli-uv.sh", "/usr/local/bin/setup-cli-uv.sh"]
 RUN chmod +x /usr/local/bin/setup-cli.sh /usr/local/bin/setup-agents.sh /usr/local/bin/setup-cli-uv.sh
 RUN /usr/local/bin/setup-agents.sh "${WORKER_TYPES}" ./temp . && rm -rf ./temp
 
-RUN find /platform -type f -name requirements.lock | while read -r req_file; do \
+RUN find /platform -type f -name requirements.txt | while read -r req_file; do \
       /usr/local/bin/setup-cli-uv.sh "$req_file"; \
     done \
     && uv cache clean \

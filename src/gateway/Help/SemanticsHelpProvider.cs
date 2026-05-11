@@ -33,6 +33,7 @@ public static class SemanticsHelpProvider
         WriteBoxRow("audio",    "Audio processing (transcription, diarization, ...)");
         WriteBoxRow("video",    "Video analysis (object detection, scenes, OCR, ...)");
         WriteBoxRow("research", "Web research (search, crawling, content extraction)");
+        WriteBoxRow("docs",     "Document processing (structured extraction, ...)");
         WriteBoxBottom();
 
         // Utility panel
@@ -47,6 +48,7 @@ public static class SemanticsHelpProvider
         WriteBoxExample("semantics audio -i interview.mp4 -o ./results -t -d");
         WriteBoxExample("semantics video -i clip.mp4 -o ./results --from-segments -s -eo");
         WriteBoxExample("semantics research -o ./results -s 'AI trends' --download");
+        WriteBoxExample("semantics docs -i document.pdf -o ./results -s");
         WriteBoxBottom();
 
         AnsiConsole.WriteLine();

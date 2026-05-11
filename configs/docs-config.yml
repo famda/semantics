@@ -1,0 +1,47 @@
+# ============================================================================
+# Docs CLI Configuration
+# ============================================================================
+# This file contains all configurable options for the document processing CLI.
+# All values shown are the defaults. Uncomment and modify as needed.
+#
+# Usage:
+#   semantics-docs -i document.pdf -o ./output --config config.yml -s
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Structured Extraction Configuration
+# ----------------------------------------------------------------------------
+# Controls how documents are parsed into structured JSON using Unstructured.
+structured:
+  # Include element metadata (coordinates, page numbers, etc.) in output
+  include_metadata: true
+
+# ----------------------------------------------------------------------------
+# Image Extraction Configuration
+# ----------------------------------------------------------------------------
+# Controls how images are extracted from PDF documents using PyMuPDF.
+# images:
+#   # Resolution for rendered images (dots per inch)
+#   dpi: 150
+#   # Minimum width/height in pixels; smaller images are skipped
+#   min_size: 100
+#   # Output image format (png, jpg)
+#   format: png
+
+# ----------------------------------------------------------------------------
+# Table Extraction Configuration
+# ----------------------------------------------------------------------------
+# Controls how tables are extracted and exported.
+# tables:
+#   # Table output format (csv)
+#   output_format: csv
+
+# ----------------------------------------------------------------------------
+# Markdown Export Configuration
+# ----------------------------------------------------------------------------
+# Controls markdown conversion using PyMuPDF4LLM.
+# markdown:
+#   # Write images referenced in the markdown output
+#   include_images: true
+#   # Resolution for embedded images (dots per inch)
+#   dpi: 150

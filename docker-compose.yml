@@ -65,12 +65,30 @@ services:
        - ./src/semantics/research/config.py:/platform/research/config.py
     <<: *cuda-support
 
+  worker-docs:
+    build:
+      context: .
+      dockerfile: src/Dockerfile
+      args:
+        WORKER_TYPES: "docs"
+    tty: true
+    environment:
+      - TF_ENABLE_ONEDNN_OPTS=0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+    volumes:
+       - ./.data/platform/workspaces:/workspaces
+       - ./src/semantics/ui.py:/platform/ui.py
+       - ./src/semantics/docs/modules:/platform/docs/modules
+       - ./src/semantics/docs/main.py:/platform/docs/main.py
+       - ./src/semantics/docs/config.py:/platform/docs/config.py
+    <<: *cuda-support
+
   worker:
     build:
       context: .
       dockerfile: src/Dockerfile
       args:
-        WORKER_TYPES: "audio,video,research"
+        WORKER_TYPES: "audio,video,research,docs"
     tty: true
     environment:
       - TF_ENABLE_ONEDNN_OPTS=0
@@ -88,4 +106,7 @@ services:
        - ./src/semantics/video/modules:/platform/video/modules
        - ./src/semantics/video/main.py:/platform/video/main.py
        - ./src/semantics/video/config.py:/platform/video/config.py
+       - ./src/semantics/docs/modules:/platform/docs/modules
+       - ./src/semantics/docs/main.py:/platform/docs/main.py
+       - ./src/semantics/docs/config.py:/platform/docs/config.py
     <<: *cuda-support

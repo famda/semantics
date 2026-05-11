@@ -133,6 +133,7 @@ if [ -f "$module_main_py" ]; then
     if [ -n "$nvidia_ld_path" ]; then
         printf 'export LD_LIBRARY_PATH="%s${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"\n' "$nvidia_ld_path" >> "$cli_wrapper_path"
     fi
+    printf 'export ORT_LOGGING_LEVEL="${ORT_LOGGING_LEVEL:-FATAL}"\n' >> "$cli_wrapper_path"
     # Pass all command-line arguments ("$@") to the main.py script
     printf 'exec "%s" "%s" "$@"\n' "$venv_python" "$module_main_py" >> "$cli_wrapper_path"
 

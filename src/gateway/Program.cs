@@ -16,6 +16,7 @@ var passThrough = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCas
     ["audio"] = "audio",
     ["video"] = "video",
     ["research"] = "research",
+    ["docs"] = "docs",
 };
 
 if (passThrough.TryGetValue(args[0], out var subcommand))

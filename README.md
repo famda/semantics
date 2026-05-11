@@ -1,6 +1,6 @@
 # Semantics CLI
 
-A unified CLI toolkit for media intelligence, providing audio processing, video analysis, and web research capabilities — all powered by state-of-the-art AI models running inside Docker.
+A unified CLI toolkit for media intelligence, providing audio processing, video analysis, document extraction, and web research capabilities — all powered by state-of-the-art AI models running inside Docker.
 
 Extract meaning, not just metadata. Composable AI operations designed for developers.
 
@@ -54,6 +54,12 @@ semantics video -i video.mp4 -o ./results --from-segments -s -eo
 
 ```bash
 semantics research -o ./results -s 'AI agents 2026' --download
+```
+
+### Docs: Extract Structure, Images, and Tables from Documents
+
+```bash
+semantics docs -i report.pdf -o ./results -s -im -t -m
 ```
 
 ### Update to the Latest Version
@@ -175,6 +181,31 @@ semantics research -o ./research_results -s 'machine learning trends' --download
 
 ---
 
+### semantics-docs
+
+Document processing and extraction toolkit.
+
+| Flag | Description |
+|------|-------------|
+| `-i, --input PATH` | Input document file (PDF, DOCX, PPTX, TXT, MD) **(required)** |
+| `-o, --output PATH` | Output folder path **(required)** |
+| `-s, --structured` | Extract structured content from the document |
+| `-im, --images` | Extract images from the document (PDF only) |
+| `-t, --tables` | Extract tables to CSV/HTML files |
+| `-m, --markdown` | Convert document to Markdown format |
+| `--debug` | Enable verbose debug logging |
+| `--plain` | Disable rich formatting, use plain text output |
+| `--config PATH` | Path to YAML config file |
+| `-h, --help` | Show help message |
+
+**Example:**
+
+```bash
+semantics docs -i report.pdf -o ./docs_results -s -im -t -m
+```
+
+---
+
 ## Utility Commands
 
 ### `semantics update`
@@ -245,6 +276,14 @@ Crawl a specific URL with depth and page limits:
 semantics research -o ./results/crawl --download-url 'https://example.com/docs' --download-deep --download-max-depth 3 --download-max-pages 50 --structured
 ```
 
+### Full Document Extraction
+
+Extract structured content, images, tables, and Markdown from a PDF:
+
+```bash
+semantics docs -i report.pdf -o ./results/docs -s -im -t -m
+```
+
 ### Using a Config File
 
 Override default model parameters and settings via YAML:
@@ -268,6 +307,7 @@ Default configuration examples are located in the repository at:
 - `configs/audio-config.yml`
 - `configs/video-config.yml`
 - `configs/research-config.yml`
+- `configs/docs-config.yml`
 
 ---
 
@@ -362,6 +402,12 @@ services:
     tty: true
     stdin_open: true
     <<: [*environment, *volumes, *cuda-support]
+
+  semantics-docs:
+    image: famda/semantics:docs-latest
+    tty: true
+    stdin_open: true
+    <<: [*environment, *volumes, *cuda-support]
 ```
 
 ### 2. Setup Your Workspace
@@ -387,6 +433,7 @@ docker compose up -d
 docker compose exec semantics-audio bash -lc "semantics-audio -i /workspaces/assets/video.mp4 -o /workspaces/results/audio_test -t -d"
 docker compose exec semantics-video bash -lc "semantics-video -i /workspaces/assets/video.mp4 -o /workspaces/results/video_test --from-segments -s -eo"
 docker compose exec semantics-research bash -lc "semantics-research -o /workspaces/results/research_test -s 'AI trends' --download"
+docker compose exec semantics-docs bash -lc "semantics-docs -i /workspaces/assets/document.pdf -o /workspaces/results/docs_test -s -im -t -m"
 ```
 
 ### 5. Stop Workers
@@ -430,6 +477,16 @@ docker run --rm \
   -lc "semantics-research -o /workspaces/output -s 'AI trends' --download"
 ```
 
+### Document Processing
+
+```bash
+docker run --rm \
+  -v "$(pwd)/assets:/workspaces/input:ro" \
+  -v "$(pwd)/results:/workspaces/output" \
+  famda/semantics:docs-latest \
+  -lc "semantics-docs -i /workspaces/input/document.pdf -o /workspaces/output -s -im -t -m"
+```
+
 ---
 
 ## Available Docker Images
@@ -438,9 +495,9 @@ Pre-built images are available on Docker Hub:
 
 | Tag Pattern | Description |
 |-------------|-------------|
-| `cli-latest` | All three CLIs in one image (used by the installer) |
-| `audio-latest`, `video-latest`, `research-latest` | Single-CLI images |
-| `audio-<sha>`, `video-<sha>`, `research-<sha>`, `cli-<sha>` | Specific commit builds |
+| `cli-latest` | All four CLIs in one image (used by the installer) |
+| `audio-latest`, `video-latest`, `research-latest`, `docs-latest` | Single-CLI images |
+| `audio-<sha>`, `video-<sha>`, `research-<sha>`, `docs-<sha>`, `cli-<sha>` | Specific commit builds |
 
 ```bash
 docker pull famda/semantics:cli-latest
