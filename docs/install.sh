@@ -138,13 +138,13 @@ if ! wait "$_pull_pid"; then
 fi
 
 # Create shim scripts for each CLI
-for cli in audio video research; do
+for cli in audio video research docs; do
     printf '#!/usr/bin/env bash\nexec "$(dirname "$0")/semantics" %s "$@"\n' "$cli" \
         > "${INSTALL_DIR}/semantics-${cli}"
     chmod +x "${INSTALL_DIR}/semantics-${cli}"
 done
 
-info "Installed: semantics, semantics-audio, semantics-video, semantics-research"
+info "Installed: semantics, semantics-audio, semantics-video, semantics-research, semantics-docs"
 
 # ---------------------------------------------------------------------------
 # Verify
@@ -222,6 +222,7 @@ echo -e "  Available commands:"
 echo -e "    ${BOLD}semantics audio${NC}     — Audio processing"
 echo -e "    ${BOLD}semantics video${NC}     — Video analysis"
 echo -e "    ${BOLD}semantics research${NC}  — Web research"
+echo -e "    ${BOLD}semantics docs${NC}      — Document processing"
 echo -e "    ${BOLD}semantics update${NC}    — Update to latest version"
 echo ""
 echo -e "  ${YELLOW}Restart your terminal${NC} or run:"

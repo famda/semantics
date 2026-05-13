@@ -130,8 +130,8 @@ if ($proc.ExitCode -ne 0) {
 }
 $proc.Dispose()
 
-# Create CLI-specific shims: semantics-audio, semantics-video, semantics-research
-foreach ($cli in @("audio", "video", "research")) {
+# Create CLI-specific shims: semantics-audio, semantics-video, semantics-research, semantics-docs
+foreach ($cli in @("audio", "video", "research", "docs")) {
     $shimContent = @"
 @echo off
 "%~dp0$BinaryName" $cli %*
@@ -139,7 +139,7 @@ foreach ($cli in @("audio", "video", "research")) {
     Set-Content -Path (Join-Path $InstallDir "semantics-$cli.cmd") -Value $shimContent -Encoding ASCII
 }
 
-Write-Info "Installed: semantics, semantics-audio, semantics-video, semantics-research"
+Write-Info "Installed: semantics, semantics-audio, semantics-video, semantics-research, semantics-docs"
 
 # ---------------------------------------------------------------------------
 # Verify
@@ -173,6 +173,7 @@ Write-Host "  Available commands:"
 Write-Host "    semantics audio     " -ForegroundColor White -NoNewline; Write-Host "- Audio processing"
 Write-Host "    semantics video     " -ForegroundColor White -NoNewline; Write-Host "- Video analysis"
 Write-Host "    semantics research  " -ForegroundColor White -NoNewline; Write-Host "- Web research"
+Write-Host "    semantics docs      " -ForegroundColor White -NoNewline; Write-Host "- Document processing"
 Write-Host "    semantics update    " -ForegroundColor White -NoNewline; Write-Host "- Update to latest version"
 Write-Host ""
 Write-Host "  Restart your terminal" -ForegroundColor Yellow -NoNewline; Write-Host " or run:"
