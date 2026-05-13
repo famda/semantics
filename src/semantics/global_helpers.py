@@ -7,7 +7,11 @@ import numpy as np
 AUDIO_FILE_TYPES = ["mp3", "wav", "flac", "ogg", "m4a"]
 VIDEO_FILE_TYPES = ["mp4", "mkv", "avi", "mov", "webm"]
 MODEL_FILE_TYPES = ["glb", "gltf", "fbx", "obj", "stl"]
-DOCUMENT_FILE_TYPES = ["pdf", "docx", "pptx", "txt", "md"]
+DOCUMENT_FILE_TYPES = [
+    "pdf", "docx", "pptx", "xlsx", "txt", "md",
+    "html", "htm", "csv", "tex",
+    "png", "jpg", "jpeg", "tiff", "bmp", "webp",
+]
 
 LANGUAGES = {
     "en": "english",

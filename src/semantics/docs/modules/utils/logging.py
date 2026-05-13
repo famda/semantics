@@ -178,5 +178,10 @@ def configure_external_logging(debug: bool) -> None:
             os.close(devnull_fd)
 
     level = logging.DEBUG if debug else logging.WARNING
-    for name in ("unstructured", "pdfminer", "PIL", "charset_normalizer"):
+    for name in (
+        "docling", "rapidocr", "RapidOCR", "pdfminer", "PIL",
+        "charset_normalizer", "RapidOCR.main", "RapidOCR.base",
+        "RapidOCR.download_file",
+    ):
         logging.getLogger(name).setLevel(level)
+

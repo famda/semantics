@@ -1,4 +1,4 @@
-"""Image extraction from PDF documents using PyMuPDF."""
+"""Image extraction from documents using PyMuPDF (PDF) and Docling (other formats)."""
 
 from __future__ import annotations
 
@@ -111,40 +111,14 @@ def _extract_images_from_page(
     return extracted
 
 
-def handle(
+def _extract_images_pymupdf(
     input_file: str,
-    output_folder: str,
-    config: "ImagesConfig | None" = None,
+    images_dir: str,
     *,
-    debug: bool = False,
-) -> dict:
-    """Extract images from a PDF document.
-
-    Args:
-        input_file: Path to the input PDF file.
-        output_folder: Path to the output directory.
-        config: ImagesConfig instance or None for defaults.
-        debug: Enable verbose debug output.
-
-    Returns:
-        Result dictionary with extraction metadata.
-    """
-    min_size = config.min_size if config else 100
-
-    input_path = Path(input_file)
-
-    # Only PDF is supported for image extraction
-    if input_path.suffix.lower() != ".pdf":
-        info_print(
-            f"Image extraction is only supported for PDF files, skipping '{input_path.suffix}'"
-        )
-        return {"source": input_path.name, "total_images": 0, "images": []}
-
-    images_dir = os.path.join(output_folder, "images")
-    os.makedirs(images_dir, exist_ok=True)
-
-    debug_print(f"Extracting images from: {input_path.name}", debug=debug)
-
+    min_size: int,
+    debug: bool,
+) -> list[dict]:
+    """Extract images from a PDF using PyMuPDF."""
     doc = pymupdf.open(input_file)
     all_images: list[dict] = []
     seen_xrefs: set = set()
@@ -164,6 +138,124 @@ def handle(
             all_images.extend(page_images)
     finally:
         doc.close()
+
+    return all_images
+
+
+def _extract_images_docling(
+    input_file: str,
+    images_dir: str,
+    *,
+    min_size: int,
+    debug: bool,
+) -> list[dict]:
+    """Extract images from a non-PDF document using Docling."""
+    from .utils.converter import convert_document
+
+    result = convert_document(input_file, debug=debug)
+    doc = result.document
+
+    all_images: list[dict] = []
+    img_counter = 0
+
+    for item in getattr(doc, "pictures", []):
+        prov = getattr(item, "prov", None)
+        image_obj = getattr(item, "image", None)
+        if image_obj is None:
+            continue
+
+        pil_image = getattr(image_obj, "pil_image", None)
+        if pil_image is None:
+            continue
+
+        width, height = pil_image.size
+        if width < min_size or height < min_size:
+            debug_print(
+                f"Skipping small docling image ({width}x{height})", debug=debug
+            )
+            continue
+
+        # Determine page
+        page_no = None
+        bbox = None
+        if prov:
+            p = prov[0] if isinstance(prov, list) else prov
+            raw_page = getattr(p, "page_no", None)
+            if raw_page is not None:
+                page_no = int(raw_page) + 1
+            bbox_obj = getattr(p, "bbox", None)
+            if bbox_obj is not None:
+                try:
+                    bbox = [
+                        round(bbox_obj.l, 2),
+                        round(bbox_obj.t, 2),
+                        round(bbox_obj.r, 2),
+                        round(bbox_obj.b, 2),
+                    ]
+                except Exception:
+                    pass
+
+        img_counter += 1
+        pno = page_no or 1
+        filename = f"{pno:08d}_{img_counter:03d}.png"
+        filepath = os.path.join(images_dir, filename)
+        pil_image.save(filepath, format="PNG")
+
+        all_images.append({
+            "filename": filename,
+            "page": page_no,
+            "index": img_counter,
+            "width": width,
+            "height": height,
+            "bbox": bbox,
+            "format": "png",
+        })
+        debug_print(f"Extracted {filename} ({width}x{height})", debug=debug)
+
+    return all_images
+
+
+def handle(
+    input_file: str,
+    output_folder: str,
+    config: "ImagesConfig | None" = None,
+    *,
+    debug: bool = False,
+) -> dict:
+    """Extract images from a document.
+
+    Uses PyMuPDF for PDF files (best raw image quality) and Docling
+    for all other supported formats.
+
+    Args:
+        input_file: Path to the input document file.
+        output_folder: Path to the output directory.
+        config: ImagesConfig instance or None for defaults.
+        debug: Enable verbose debug output.
+
+    Returns:
+        Result dictionary with extraction metadata.
+    """
+    min_size = config.min_size if config else 100
+
+    input_path = Path(input_file)
+    images_dir = os.path.join(output_folder, "images")
+    os.makedirs(images_dir, exist_ok=True)
+
+    debug_print(f"Extracting images from: {input_path.name}", debug=debug)
+
+    # Use PyMuPDF for native PDFs (best quality + page/bbox).
+    # For non-PDF originals, use Docling which provides page/bbox via
+    # the internal PDF conversion.  LibreOffice-converted PDFs embed
+    # images in a way PyMuPDF cannot resolve positions for.
+    if input_path.suffix.lower() == ".pdf":
+        all_images = _extract_images_pymupdf(
+            str(input_path), images_dir, min_size=min_size, debug=debug
+        )
+    else:
+        all_images = _extract_images_docling(
+            input_file, images_dir, min_size=min_size, debug=debug
+        )
 
     # Write manifest
     manifest = {

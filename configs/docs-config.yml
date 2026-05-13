@@ -11,7 +11,7 @@
 # ----------------------------------------------------------------------------
 # Structured Extraction Configuration
 # ----------------------------------------------------------------------------
-# Controls how documents are parsed into structured JSON using Unstructured.
+# Controls how documents are parsed into structured JSON using Docling.
 structured:
   # Include element metadata (coordinates, page numbers, etc.) in output
   include_metadata: true
@@ -19,7 +19,8 @@ structured:
 # ----------------------------------------------------------------------------
 # Image Extraction Configuration
 # ----------------------------------------------------------------------------
-# Controls how images are extracted from PDF documents using PyMuPDF.
+# Controls how images are extracted from documents.
+# Uses PyMuPDF for PDF files and Docling for other formats.
 # images:
 #   # Resolution for rendered images (dots per inch)
 #   dpi: 150
@@ -32,6 +33,7 @@ structured:
 # Table Extraction Configuration
 # ----------------------------------------------------------------------------
 # Controls how tables are extracted and exported.
+# Uses PyMuPDF for PDF files and Docling for other formats.
 # tables:
 #   # Table output format (csv)
 #   output_format: csv
@@ -39,9 +41,116 @@ structured:
 # ----------------------------------------------------------------------------
 # Markdown Export Configuration
 # ----------------------------------------------------------------------------
-# Controls markdown conversion using PyMuPDF4LLM.
+# Controls markdown conversion. Uses Docling as primary converter,
+# falls back to PyMuPDF4LLM for PDF files.
 # markdown:
 #   # Write images referenced in the markdown output
 #   include_images: true
 #   # Resolution for embedded images (dots per inch)
 #   dpi: 150
+
+# ----------------------------------------------------------------------------
+# Named Entity Recognition Configuration
+# ----------------------------------------------------------------------------
+# Controls NER extraction from document text. Requires -s flag.
+# ner:
+#   # HuggingFace NER model name
+#   model: Jean-Baptiste/roberta-large-ner-english
+#   # Device to run on (cuda/cpu/null for auto)
+#   device: null
+#   # Batch size for inference
+#   batch_size: 8
+#   # Minimum confidence threshold
+#   confidence_threshold: 0.6
+#   # Token aggregation strategy
+#   aggregation_strategy: simple
+
+# ----------------------------------------------------------------------------
+# Classification Configuration
+# ----------------------------------------------------------------------------
+# Controls LLM-based document classification using Qwen3-VL. Requires -s flag.
+# The model reads the document text and determines the type + relevant tags.
+# classify:
+#   # HuggingFace model for classification (text-only mode)
+#   model: Qwen/Qwen3-VL-2B-Instruct
+#   # Max tokens for the classification response
+#   max_tokens: 256
+#   # Maximum number of tags to return
+#   max_tags: 8
+#   # Candidate labels to guide classification (model may suggest alternatives)
+#   candidate_labels:
+#     - invoice
+#     - contract
+#     - report
+#     - letter
+#     - resume
+#     - scientific paper
+#     - manual
+#     - form
+#     - presentation
+#     - legal document
+#     - financial statement
+#     - memo
+#     - newsletter
+#     - brochure
+#     - engineering document
+#     - architecture document
+#     - cyber security report
+#     - technical specification
+#     - user guide
+#     - policy document
+#     - compliance document
+#     - project plan
+#     - meeting notes
+#     - proposal
+#     - whitepaper
+#     - datasheet
+
+# ----------------------------------------------------------------------------
+# Document Overview Configuration
+# ----------------------------------------------------------------------------
+# Controls LLM-based overview generation for RAG / semantic search. Requires -s flag.
+# Generates a concise summary, key topics, and document type.
+# overview:
+#   # HuggingFace model for overview generation (text-only mode)
+#   model_id: Qwen/Qwen3-VL-2B-Instruct
+#   # Max tokens per generation call
+#   max_tokens: 1024
+#   # Max characters per text chunk for iterative summarization
+#   chunk_size: 6000
+
+# ----------------------------------------------------------------------------
+# Forms / Key-Value Extraction Configuration
+# ----------------------------------------------------------------------------
+# Controls form field and key-value pair extraction.
+# forms:
+#   # Device (cuda/cpu/null for auto)
+#   device: null
+
+# ----------------------------------------------------------------------------
+# Image Captioning Configuration
+# ----------------------------------------------------------------------------
+# Controls image captioning using BLIP + Qwen3-VL. Requires -im flag.
+#
+# Quality presets:
+#   speed    - BLIP only (~0.5s/image, basic captions)
+#   balanced - BLIP + Qwen3-VL 256 tokens (~12s/image)
+#   quality  - BLIP + Qwen3-VL 512 tokens (~21s/image) [default]
+#
+# captions:
+#   # Quality preset: speed | balanced | quality
+#   quality: quality
+#   # BLIP model for basic captions
+#   model_id: Salesforce/blip-image-captioning-large
+#   # Model precision (fp16, bf16, fp32)
+#   precision: fp16
+#   # VLM model for very detailed captions (used in balanced/quality)
+#   detailed_model_id: Qwen/Qwen3-VL-2B-Instruct
+#   # Max tokens for detailed captions (0 = auto from quality preset)
+#   detailed_max_tokens: 0
+#   # Run NER on detailed captions to extract entities per image
+#   run_ner: true
+#   # NER model for entity extraction from captions
+#   ner_model: Jean-Baptiste/roberta-large-ner-english
+#   # Minimum confidence for NER entities
+#   ner_confidence: 0.6

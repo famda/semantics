@@ -12,6 +12,12 @@ pydantic>=2.0
 PyYAML>=6.0.3
 
 # Document Processing
-unstructured[all-docs]>=0.18
+docling>=2.90
 python-magic>=0.4.27
 pymupdf4llm>=0.0.20
+
+# NER & Classification & Captioning
+torch>=2.0
+transformers>=4.57
+accelerate>=0.28.0
+sentencepiece>=0.2.0

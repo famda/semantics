@@ -23,6 +23,10 @@ RUN apt-get update && \
     libglib2.0-0 \
     python3-venv \
     libmagic1 \
+    libreoffice-writer \
+    libreoffice-impress \
+    libreoffice-calc \
+    libreoffice-draw \
     wget \
     # Add PowerShell repo and install (use Ubuntu repo per request) \
     && wget -q https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb \

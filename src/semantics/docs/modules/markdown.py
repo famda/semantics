@@ -1,12 +1,10 @@
-"""Markdown export using PyMuPDF4LLM."""
+"""Markdown export using Docling (primary) and PyMuPDF4LLM (PDF fallback)."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING
-
-import pymupdf4llm
 
 from .utils.logging import debug_print, info_print
 
@@ -30,6 +28,41 @@ def _rewrite_image_paths(md_text: str, images_dir: str) -> str:
     return md_text
 
 
+def _convert_with_docling(input_file: str, *, debug: bool = False) -> str:
+    """Convert a document to markdown using Docling."""
+    from .utils.converter import convert_document
+
+    result = convert_document(input_file, debug=debug)
+    doc = result.document
+    return doc.export_to_markdown()
+
+
+def _convert_with_pymupdf4llm(
+    input_file: str,
+    markdown_dir: str,
+    *,
+    include_images: bool,
+    dpi: int,
+    debug: bool,
+) -> str:
+    """Convert a PDF to markdown using pymupdf4llm."""
+    import pymupdf4llm
+
+    kwargs: dict = {"dpi": dpi}
+    if include_images:
+        images_dir = os.path.join(markdown_dir, "images")
+        os.makedirs(images_dir, exist_ok=True)
+        kwargs["write_images"] = True
+        kwargs["image_path"] = images_dir
+
+    md_text = pymupdf4llm.to_markdown(input_file, **kwargs)
+
+    if include_images:
+        md_text = _rewrite_image_paths(md_text, images_dir)
+
+    return md_text
+
+
 def handle(
     input_file: str,
     output_folder: str,
@@ -38,6 +71,10 @@ def handle(
     debug: bool = False,
 ) -> dict:
     """Convert a document to Markdown format.
+
+    Uses Docling as the primary converter for all formats.
+    Falls back to pymupdf4llm for PDF files when Docling produces
+    empty output.
 
     Args:
         input_file: Path to the input document file.
@@ -54,26 +91,31 @@ def handle(
     input_path = Path(input_file)
     debug_print(f"Converting to markdown: {input_path.name}", debug=debug)
 
-    # Create markdown subfolder
     markdown_dir = os.path.join(output_folder, "markdown")
     os.makedirs(markdown_dir, exist_ok=True)
 
-    # Build kwargs for to_markdown
-    kwargs: dict = {
-        "dpi": dpi,
-    }
+    # Always prefer pymupdf4llm via the converted PDF (best image handling)
+    from .utils.converter import get_pdf_path
+    effective_path = get_pdf_path(input_file)
 
-    if include_images:
-        images_dir = os.path.join(markdown_dir, "images")
-        os.makedirs(images_dir, exist_ok=True)
-        kwargs["write_images"] = True
-        kwargs["image_path"] = images_dir
+    if effective_path.lower().endswith(".pdf"):
+        md_text = _convert_with_pymupdf4llm(
+            effective_path,
+            markdown_dir,
+            include_images=include_images,
+            dpi=dpi,
+            debug=debug,
+        )
+        # Fall back to Docling if pymupdf4llm produced empty output
+        if not md_text.strip():
+            debug_print("pymupdf4llm produced empty markdown, falling back to Docling", debug=debug)
+            md_text = _convert_with_docling(input_file, debug=debug)
+    else:
+        md_text = _convert_with_docling(input_file, debug=debug)
 
-    md_text = pymupdf4llm.to_markdown(input_file, **kwargs)
-
-    # Fix image paths to be relative to the markdown file
-    if include_images:
-        md_text = _rewrite_image_paths(md_text, images_dir)
+        # Fall back message for non-PDF
+        if not md_text.strip():
+            debug_print(f"Docling produced empty markdown for {input_path.suffix}", debug=debug)
 
     # Write markdown output
     output_filename = f"{input_path.stem}.md"

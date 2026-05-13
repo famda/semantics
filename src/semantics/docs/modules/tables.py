@@ -1,4 +1,4 @@
-"""Table extraction from documents using PyMuPDF and Unstructured."""
+"""Table extraction from documents using PyMuPDF and Docling."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List
 
 import pymupdf
-from unstructured.partition.auto import partition
 
 from .utils.logging import debug_print, info_print
 
@@ -110,21 +109,70 @@ def _extract_tables_pymupdf(input_file: str, *, debug: bool = False) -> list[dic
     return tables
 
 
-def _extract_tables_unstructured(input_file: str, *, debug: bool = False) -> list[dict]:
-    """Use unstructured partition to find Table elements."""
-    elements = list(partition(filename=input_file))
-    table_elements = [el for el in elements if el.category == "Table"]
-    debug_print(
-        f"Unstructured found {len(table_elements)} table(s) out of {len(elements)} elements",
-        debug=debug,
-    )
+def _extract_tables_docling(input_file: str, *, debug: bool = False) -> list[dict]:
+    """Use Docling to extract tables from any supported format."""
+    from .utils.converter import convert_document
+
+    result = convert_document(input_file, debug=debug)
+    doc = result.document
+
     tables: list[dict] = []
-    for el in table_elements:
+    for item in getattr(doc, "tables", []):
+        prov = getattr(item, "prov", None)
+
+        # Page number
+        page_no = None
+        if prov:
+            p = prov[0] if isinstance(prov, list) else prov
+            raw = getattr(p, "page_no", None)
+            if raw is not None:
+                page_no = int(raw) + 1
+
+        # Try DataFrame export for CSV text
+        text = ""
+        rows_count = 0
+        cols_count = 0
+        try:
+            df = item.export_to_dataframe(doc=doc)
+            text = df.to_csv(index=False)
+            rows_count = len(df)
+            cols_count = len(df.columns)
+        except Exception:
+            text = getattr(item, "text", "") or ""
+
+        # Try HTML export
+        html = ""
+        try:
+            html = item.export_to_html(doc=doc)
+        except Exception:
+            pass
+
+        # Bounding box
+        bbox = None
+        if prov:
+            p = prov[0] if isinstance(prov, list) else prov
+            bbox_obj = getattr(p, "bbox", None)
+            if bbox_obj is not None:
+                try:
+                    bbox = [
+                        round(bbox_obj.l, 2),
+                        round(bbox_obj.t, 2),
+                        round(bbox_obj.r, 2),
+                        round(bbox_obj.b, 2),
+                    ]
+                except Exception:
+                    pass
+
         tables.append({
-            "page": getattr(el.metadata, "page_number", None),
-            "text": str(el.text) if el.text else "",
-            "text_as_html": getattr(el.metadata, "text_as_html", None) or "",
+            "page": page_no,
+            "text": text,
+            "text_as_html": html,
+            "rows": rows_count,
+            "cols": cols_count,
+            "bbox": bbox,
         })
+
+    debug_print(f"Docling found {len(tables)} table(s)", debug=debug)
     return tables
 
 
@@ -155,11 +203,14 @@ def handle(
 
     debug_print(f"Extracting tables from: {input_path.name}", debug=debug)
 
-    # Use PyMuPDF for PDFs (much better table detection), unstructured otherwise
-    if input_path.suffix.lower() == ".pdf":
-        table_data = _extract_tables_pymupdf(input_file, debug=debug)
+    # Always prefer PyMuPDF via the converted PDF (better table detection + page/bbox)
+    from .utils.converter import get_pdf_path
+    effective_path = get_pdf_path(input_file)
+
+    if effective_path.lower().endswith(".pdf"):
+        table_data = _extract_tables_pymupdf(effective_path, debug=debug)
     else:
-        table_data = _extract_tables_unstructured(input_file, debug=debug)
+        table_data = _extract_tables_docling(input_file, debug=debug)
 
     exported: list[dict] = []
 
