@@ -77,7 +77,8 @@ def generate_text(
 
     Constructs a single-turn chat message and returns the decoded output.
     """
-    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+    # Prefix with /no_think to disable Qwen3 reasoning chains
+    messages = [{"role": "user", "content": [{"type": "text", "text": f"/no_think\n{prompt}"}]}]
 
     inputs = processor.apply_chat_template(
         messages,
@@ -99,6 +100,11 @@ def generate_text(
         )
 
     generated = [out[len(inp) :] for inp, out in zip(inputs["input_ids"], output_ids)]
-    return processor.batch_decode(
+    result = processor.batch_decode(
         generated, skip_special_tokens=True, clean_up_tokenization_spaces=False,
     )[0].strip()
+
+    # Strip <think>…</think> reasoning blocks that Qwen3 may still emit
+    import re
+    result = re.sub(r"<think>.*?</think>", "", result, flags=re.DOTALL).strip()
+    return result

@@ -56,22 +56,15 @@ _SINGLE_PROMPT = (
     "Document overview:"
 )
 
-_TOPICS_PROMPT = (
-    "Based on this document overview, list the 5-10 most important key topics "
-    "or themes as a JSON array of short strings. Only output the JSON array, "
-    "nothing else.\n\n"
+_METADATA_PROMPT = (
+    "Based on this document overview, provide:\n"
+    "1. The 5-10 most important key topics or themes\n"
+    "2. The single best document type classification (e.g., technical specification, "
+    "design document, user guide, datasheet, report, proposal, policy, contract, "
+    "invoice, whitepaper, research paper, presentation, manual)\n\n"
     "Overview:\n{text}\n\n"
-    "Key topics:"
-)
-
-_DOCTYPE_PROMPT = (
-    "Based on this document overview, what is the single best document type "
-    "classification? Examples: technical specification, design document, "
-    "user guide, datasheet, report, proposal, policy, contract, invoice, "
-    "whitepaper, research paper, presentation, manual.\n"
-    "Reply with ONLY the document type label, nothing else.\n\n"
-    "Overview:\n{text}\n\n"
-    "Document type:"
+    "Respond ONLY with a JSON object in this exact format:\n"
+    '{{"key_topics": ["topic1", "topic2", ...], "document_type": "type"}}'
 )
 
 
@@ -101,6 +94,42 @@ def _parse_json_array(text: str) -> list[str]:
         for item in items
         if item.strip().strip("-").strip("•").strip('"').strip("'").strip("[").strip("]").strip()
     ][:10]
+
+
+def _parse_metadata(text: str) -> tuple[list[str], str]:
+    """Extract key_topics and document_type from a combined JSON response."""
+    import re
+
+    # Strip <think>…</think> blocks that Qwen3 may emit
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        try:
+            obj = json.loads(match.group())
+            if isinstance(obj, dict):
+                topics = [
+                    str(t).strip()
+                    for t in obj.get("key_topics", [])
+                    if str(t).strip()
+                ][:10]
+                doc_type = str(obj.get("document_type", "")).strip().strip('"').strip("'")
+                if topics and doc_type:
+                    return topics, doc_type
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: try to extract topics array and doc_type separately
+    topics = _parse_json_array(text)
+    doc_type = "unknown"
+    for line in text.split("\n"):
+        if "document_type" in line.lower():
+            # Try to extract value after colon or quotes
+            parts = line.split(":", 1)
+            if len(parts) > 1:
+                doc_type = parts[1].strip().strip('"').strip("'").strip(",")
+                break
+    return topics, doc_type
 
 
 def _build_markdown(
@@ -210,19 +239,14 @@ def handle(
             )
         debug_print(f"Synthesized overview: {len(summary)} chars", debug=debug)
 
-    # --- Extract key topics ---
-    prompt = _TOPICS_PROMPT.format(text=summary)
+    # --- Extract key topics + document type in one call ---
+    prompt = _METADATA_PROMPT.format(text=summary)
     with gray_debug_output(debug):
-        topics_raw = generate_text(model, processor, prompt, max_tokens=128)
-    key_topics = _parse_json_array(topics_raw)
+        metadata_raw = generate_text(
+            model, processor, prompt, max_tokens=192, temperature=0.3,
+        )
+    key_topics, document_type = _parse_metadata(metadata_raw)
     debug_print(f"Key topics: {key_topics}", debug=debug)
-
-    # --- Determine document type ---
-    prompt = _DOCTYPE_PROMPT.format(text=summary)
-    with gray_debug_output(debug):
-        document_type = generate_text(
-            model, processor, prompt, max_tokens=32, temperature=0.3,
-        ).strip().strip('"').strip("'")
     debug_print(f"Document type: {document_type}", debug=debug)
 
     # --- Build output ---

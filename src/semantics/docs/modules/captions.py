@@ -97,6 +97,29 @@ def _caption_blip(
     return processor.decode(out[0], skip_special_tokens=True).strip()
 
 
+def _caption_blip_batch(
+    model, processor, images: list[Image.Image],
+    *, text_prompt: str | None = None, max_tokens: int = 100,
+) -> list[str]:
+    """Batch-caption multiple images in a single forward pass."""
+    if not images:
+        return []
+
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+
+    if text_prompt:
+        texts = [text_prompt] * len(images)
+        inputs = processor(images=images, text=texts, return_tensors="pt", padding=True).to(device, dtype)
+    else:
+        inputs = processor(images=images, return_tensors="pt", padding=True).to(device, dtype)
+
+    with torch.inference_mode():
+        out = model.generate(**inputs, max_new_tokens=max_tokens)
+
+    return [processor.decode(o, skip_special_tokens=True).strip() for o in out]
+
+
 # ---------------------------------------------------------------------------
 # Qwen3-VL (very detailed captions) — uses shared VLM from utils/vlm.py
 # ---------------------------------------------------------------------------
@@ -145,13 +168,9 @@ def _strip_intro(text: str) -> str:
 
 def _caption_vlm(
     model, processor, image: Image.Image, *, max_tokens: int = 512,
-    doc_context: str = "",
+    prompt_text: str = "",
 ) -> str:
-    prompt = (
-        _VLM_PROMPT_WITH_CONTEXT.format(context=doc_context)
-        if doc_context
-        else _VLM_PROMPT_NO_CONTEXT
-    )
+    prompt = prompt_text or _VLM_PROMPT_NO_CONTEXT
     messages = [
         {
             "role": "user",
@@ -161,7 +180,6 @@ def _caption_vlm(
             ],
         }
     ]
-    # Qwen3-VL API: apply_chat_template handles tokenization directly
     inputs = processor.apply_chat_template(
         messages,
         tokenize=True,
@@ -185,6 +203,9 @@ def _caption_vlm(
     raw = processor.batch_decode(
         generated, skip_special_tokens=True, clean_up_tokenization_spaces=False,
     )[0].strip()
+    # Strip <think>…</think> reasoning blocks that Qwen3 may still emit
+    import re as _re
+    raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL).strip()
     return _strip_intro(raw)
 
 
@@ -307,13 +328,16 @@ def handle(
         info_print("No images to caption")
         return manifest
 
-    # ----- Phase 1: BLIP basic captions -----
+    # ----- Phase 1: BLIP basic captions (batched) -----
     info_print(f"Captioning {len(image_entries)} image(s) with BLIP")
 
     with gray_debug_output(debug):
         blip_model, blip_proc = _load_blip(model_id=blip_model_id, precision=precision)
 
-    for idx, entry in enumerate(image_entries, 1):
+    # Load all images upfront for batching
+    _blip_images: list[Image.Image] = []
+    _blip_indices: list[int] = []  # indices into image_entries
+    for idx, entry in enumerate(image_entries):
         filename = entry.get("filename")
         if not filename:
             continue
@@ -322,17 +346,38 @@ def handle(
             continue
         try:
             pil_img = Image.open(img_path).convert("RGB")
+            _blip_images.append(pil_img)
+            _blip_indices.append(idx)
         except Exception:
             continue
 
-        with gray_debug_output(debug):
-            entry["caption"] = _caption_blip(blip_model, blip_proc, pil_img)
-            entry["caption_detailed"] = _caption_blip(
-                blip_model, blip_proc, pil_img, text_prompt="a detailed photograph of"
-            )
-        debug_print(f"[BLIP {idx}/{len(image_entries)}] {filename}: {entry['caption'][:60]}", debug=debug)
+    # Process in batches of up to 8 images
+    _BLIP_BATCH_SIZE = 8
+    with gray_debug_output(debug):
+        for batch_start in range(0, len(_blip_images), _BLIP_BATCH_SIZE):
+            batch_imgs = _blip_images[batch_start:batch_start + _BLIP_BATCH_SIZE]
+            batch_idxs = _blip_indices[batch_start:batch_start + _BLIP_BATCH_SIZE]
 
-    info_print(f"BLIP captions complete for {len(image_entries)} image(s)")
+            # Basic captions (unconditional)
+            captions_basic = _caption_blip_batch(blip_model, blip_proc, batch_imgs)
+            # Detailed captions (conditional)
+            captions_detailed = _caption_blip_batch(
+                blip_model, blip_proc, batch_imgs,
+                text_prompt="a detailed photograph of",
+            )
+
+            for i, entry_idx in enumerate(batch_idxs):
+                image_entries[entry_idx]["caption"] = captions_basic[i]
+                image_entries[entry_idx]["caption_detailed"] = captions_detailed[i]
+
+    for idx in _blip_indices:
+        entry = image_entries[idx]
+        debug_print(
+            f"[BLIP {idx+1}/{len(image_entries)}] {entry.get('filename','')}: {entry.get('caption','')[:60]}",
+            debug=debug,
+        )
+
+    info_print(f"BLIP captions complete for {len(_blip_indices)} image(s)")
 
     if not use_vlm:
         # Speed mode — skip VLM and NER, save and return
@@ -357,6 +402,13 @@ def handle(
     with gray_debug_output(debug):
         vlm_model, vlm_proc = load_vlm(model_id=vlm_model_id)
 
+    # Pre-compute the prompt text once (same for all images)
+    vlm_prompt_text = (
+        _VLM_PROMPT_WITH_CONTEXT.format(context=doc_context)
+        if doc_context
+        else _VLM_PROMPT_NO_CONTEXT
+    )
+
     for idx, entry in enumerate(image_entries, 1):
         filename = entry.get("filename")
         if not filename:
@@ -372,7 +424,7 @@ def handle(
         with gray_debug_output(debug):
             entry["caption_very_detailed"] = _caption_vlm(
                 vlm_model, vlm_proc, pil_img, max_tokens=vlm_max_tokens,
-                doc_context=doc_context,
+                prompt_text=vlm_prompt_text,
             )
         debug_print(
             f"[VLM {idx}/{len(image_entries)}] {filename}: {entry['caption_very_detailed'][:80]}",
